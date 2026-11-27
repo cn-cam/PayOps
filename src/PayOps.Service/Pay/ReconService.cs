@@ -40,33 +40,43 @@ public sealed class ReconService(
     public async Task<int> ScheduleAsync()
     {
         if (!_options.Recon.Enabled || BusinessNow.Hour < _options.Recon.Hour) return 0;
-        var billProviders = providers.All.Where(p => p.Meta.Capabilities.Bill).Select(p => p.Meta.Code).ToList();
-        if (billProviders.Count == 0) return 0;
+        var tradeProviders = providers.All.Where(p => p.Meta.Capabilities.Bill).Select(p => p.Meta.Code).ToList();
+        var fundProviders = providers.All.Where(p => p.Meta.Capabilities.FundBill).Select(p => p.Meta.Code).ToList();
+        if (tradeProviders.Count == 0 && fundProviders.Count == 0) return 0;
         var date = DateOnly.FromDateTime(BusinessNow.AddDays(-1)).ToString("yyyy-MM-dd");
-        return await db.ExecuteAsync(
+        var inserted = await db.ExecuteAsync(
             """
-            INSERT IGNORE INTO pay_recon_batch (passage_id, provider, bill_date, status, next_run_at, created_at, updated_at)
-            SELECT id, provider, @date, 0, UTC_TIMESTAMP(3), UTC_TIMESTAMP(3), UTC_TIMESTAMP(3)
-            FROM pay_passage WHERE status = 1 AND provider IN @billProviders
-            """, new { date, billProviders });
+            INSERT IGNORE INTO pay_recon_batch (passage_id, provider, bill_date, kind, status, next_run_at, created_at, updated_at)
+            SELECT id, provider, @date, 1, 0, UTC_TIMESTAMP(3), UTC_TIMESTAMP(3), UTC_TIMESTAMP(3)
+            FROM pay_passage WHERE status = 1 AND provider IN @tradeProviders
+            """, new { date, tradeProviders });
+        inserted += await db.ExecuteAsync(
+            """
+            INSERT IGNORE INTO pay_recon_batch (passage_id, provider, bill_date, kind, status, next_run_at, created_at, updated_at)
+            SELECT id, provider, @date, 2, 0, UTC_TIMESTAMP(3), UTC_TIMESTAMP(3), UTC_TIMESTAMP(3)
+            FROM pay_passage WHERE status = 1 AND provider IN @fundProviders
+            """, new { date, fundProviders });
+        return inserted;
     }
 
     /// <summary>手动发起（或重跑）某通道某天的对账，立即派发执行。</summary>
-    public async Task<long> TriggerAsync(long passageId, string billDate)
+    public async Task<long> TriggerAsync(long passageId, string billDate, int kind = 1)
     {
+        if (kind is not (1 or 2)) throw new PayException(ErrorCodes.InvalidParam, "kind 只能是 1（交易账单）或 2（资金账单）");
         if (!DateOnly.TryParseExact(billDate, "yyyy-MM-dd", out var date)) throw new PayException(ErrorCodes.InvalidParam, "账单日格式应为 yyyy-MM-dd");
         if (date >= DateOnly.FromDateTime(BusinessNow)) throw new PayException(ErrorCodes.InvalidParam, "只能对今天之前的日期对账");
         var passage = await cache.GetPassageAsync(passageId) ?? throw new PayException(ErrorCodes.InvalidParam, "通道不存在");
         var provider = providers.Get(passage.Passage.Provider);
-        if (!provider.Meta.Capabilities.Bill) throw new PayException(ErrorCodes.NotSupported, $"{provider.Meta.Name}不支持下载对账单");
+        var supported = kind == 1 ? provider.Meta.Capabilities.Bill : provider.Meta.Capabilities.FundBill;
+        if (!supported) throw new PayException(ErrorCodes.NotSupported, $"{provider.Meta.Name}不支持下载{(kind == 1 ? "交易账单" : "资金账单")}");
 
         await db.ExecuteAsync(
             """
-            INSERT INTO pay_recon_batch (passage_id, provider, bill_date, status, attempts, next_run_at, created_at, updated_at)
-            VALUES (@passageId, @provider, @billDate, 0, 0, @lease, UTC_TIMESTAMP(3), UTC_TIMESTAMP(3))
+            INSERT INTO pay_recon_batch (passage_id, provider, bill_date, kind, status, attempts, next_run_at, created_at, updated_at)
+            VALUES (@passageId, @provider, @billDate, @kind, 0, 0, @lease, UTC_TIMESTAMP(3), UTC_TIMESTAMP(3))
             ON DUPLICATE KEY UPDATE status = 0, attempts = 0, error_msg = '', next_run_at = @lease, updated_at = UTC_TIMESTAMP(3)
-            """, new { passageId, provider = provider.Meta.Code, billDate, lease = DateTime.UtcNow + RunLease });
-        var id = await db.ScalarAsync<long>("SELECT id FROM pay_recon_batch WHERE passage_id = @passageId AND bill_date = @billDate", new { passageId, billDate });
+            """, new { passageId, provider = provider.Meta.Code, billDate, kind, lease = DateTime.UtcNow + RunLease });
+        var id = await db.ScalarAsync<long>("SELECT id FROM pay_recon_batch WHERE passage_id = @passageId AND bill_date = @billDate AND kind = @kind", new { passageId, billDate, kind });
         try
         {
             await mq.PublishAsync(MqBus.CheckQueue, "recon:" + id);
@@ -128,6 +138,11 @@ public sealed class ReconService(
         var batch = await db.GetAsync<PayReconBatch>(batchId);
         if (batch is null || batch.Status != ReconStatus.Pending) return;
         if (!DateOnly.TryParseExact(batch.BillDate, "yyyy-MM-dd", out var date)) return;
+        if (batch.Kind == ReconKind.Fund)
+        {
+            await RunFundAsync(batch, date, passage: await cache.GetPassageAsync(batch.PassageId), provider: providers.Find(batch.Provider), ct);
+            return;
+        }
 
         var passage = await cache.GetPassageAsync(batch.PassageId);
         var provider = providers.Find(batch.Provider);
@@ -238,6 +253,16 @@ public sealed class ReconService(
         foreach (var local in localRefunds.Where(r => !matchedRefunds.Contains(r.RefundNo)))
             diffs.Add(Diff(ReconBizType.Refund, ReconDiffType.LocalOnly, local.OrderNo, local.RefundNo, local.UpstreamRefundNo ?? "", local.Amount, null, "退款成功"));
 
+        // ---------- 手续费 ----------
+        var upstreamFee = bill.Sum(i => i.Fee ?? 0);
+        var expectedFee = 0L;
+        if (passage!.Passage.FeeRateBp > 0)
+            expectedFee = bill.Sum(i => i.Amount * passage.Passage.FeeRateBp / 10_000 * (i.Kind == BillItemKind.Pay ? 1 : -1));
+        var hasFee = bill.Any(i => i.Fee is not null);
+        if (hasFee && passage.Passage.FeeRateBp > 0 && Math.Abs(upstreamFee - expectedFee) > _options.Recon.FeeTolerance)
+            diffs.Add(Diff(ReconBizType.Fee, ReconDiffType.AmountMismatch, "", "", "",
+                expectedFee, upstreamFee, $"按费率 {passage.Passage.FeeRateBp / 100m:0.##}% 应收 {expectedFee / 100m:0.00} 元"));
+
         var total = diffs.Count;
         if (total > MaxDiffRows) logger.LogError("对账批次 {BatchId} 差异 {Total} 条，超过上限，仅保存前 {Max} 条", batchId, total, MaxDiffRows);
 
@@ -248,7 +273,8 @@ public sealed class ReconService(
             await conn.ExecuteAsync(
                 """
                 UPDATE pay_recon_batch SET status = @status, upstream_pay_count = @upc, upstream_pay_amount = @upa,
-                  upstream_refund_count = @urc, upstream_refund_amount = @ura, local_pay_count = @lpc, local_pay_amount = @lpa,
+                  upstream_refund_count = @urc, upstream_refund_amount = @ura, upstream_fee_amount = @upstreamFee, expected_fee_amount = @expectedFee,
+                  local_pay_count = @lpc, local_pay_amount = @lpa,
                   local_refund_count = @lrc, local_refund_amount = @lra, diff_count = @total, error_msg = '', attempts = attempts + 1,
                   next_run_at = NULL, finished_at = UTC_TIMESTAMP(3), updated_at = UTC_TIMESTAMP(3)
                 WHERE id = @batchId
@@ -261,6 +287,7 @@ public sealed class ReconService(
                     urc = billRefunds.Count, ura = billRefunds.Sum(i => i.Amount),
                     lpc = localPays.Count, lpa = localPays.Sum(p => p.Amount),
                     lrc = localRefunds.Count, lra = localRefunds.Sum(r => r.Amount),
+                    upstreamFee, expectedFee,
                 }, tx);
             return 0;
         });
@@ -269,6 +296,93 @@ public sealed class ReconService(
             logger.LogInformation("对账 {Provider} 通道 {PassageId} {Date}：平账，支付 {Pays} 笔，退款 {Refunds} 笔", batch.Provider, batch.PassageId, batch.BillDate, billPays.Count, billRefunds.Count);
         else
             logger.LogWarning("对账 {Provider} 通道 {PassageId} {Date}：发现 {Total} 条差异", batch.Provider, batch.PassageId, batch.BillDate, total);
+    }
+
+    /// <summary>资金账单核对：收入应等于当日成功支付，支出应等于当日成功退款 + 上游手续费。</summary>
+    private async Task RunFundAsync(PayReconBatch batch, DateOnly date, PassageEntry? passage, IPayProvider? provider, CancellationToken ct)
+    {
+        if (passage is null || provider is null)
+        {
+            await FailAsync(batch, "通道或支付类型不存在", final: true);
+            return;
+        }
+        var (start, end) = UtcRange(date);
+        var localPay = await db.FirstOrDefaultAsync<AmountSum>(
+            "SELECT COUNT(*) AS count, COALESCE(SUM(amount), 0) AS amount FROM pay_order WHERE passage_id = @PassageId AND status = 1 AND paid_at >= @start AND paid_at < @end",
+            new { batch.PassageId, start, end }) ?? new AmountSum();
+        var localRefund = await db.FirstOrDefaultAsync<AmountSum>(
+            "SELECT COUNT(*) AS count, COALESCE(SUM(amount), 0) AS amount FROM pay_refund WHERE passage_id = @PassageId AND status = 1 AND success_at >= @start AND success_at < @end",
+            new { batch.PassageId, start, end }) ?? new AmountSum();
+
+        // 模拟通道用本地成功记录合成资金账单，真实通道会忽略 LocalItems
+        var localRows = await db.QueryAsync<LocalPay>(
+            "SELECT order_no, upstream_trade_no, amount FROM pay_order WHERE passage_id = @PassageId AND status = 1 AND paid_at >= @start AND paid_at < @end",
+            new { batch.PassageId, start, end });
+        FundBillSummary fund;
+        try
+        {
+            fund = await provider.DownloadFundBillAsync(new BillContext
+            {
+                PassageId = batch.PassageId, Config = passage.Config, BillDate = date,
+                LocalItems = [.. localRows.Select(p => new BillItem
+                {
+                    Kind = BillItemKind.Pay, OrderNo = p.OrderNo, UpstreamTradeNo = p.UpstreamTradeNo ?? "", Amount = p.Amount,
+                })],
+            }, ct);
+        }
+        catch (Exception ex) when (ex is ProviderException or InvalidDataException or FormatException)
+        {
+            await FailAsync(batch, ex.Message, final: batch.Attempts + 1 >= _options.Recon.MaxAttempts);
+            return;
+        }
+
+        var diffs = new List<PayReconDiff>();
+        PayReconDiff Diff(ReconBizType biz, ReconDiffType type, long? local, long? upstream, string status) => new()
+        {
+            BatchId = batch.Id, PassageId = batch.PassageId, Provider = batch.Provider, BillDate = batch.BillDate,
+            BizType = biz, DiffType = type, LocalAmount = local, UpstreamAmount = upstream, LocalStatus = status, CreatedAt = DateTime.UtcNow,
+        };
+        if (Math.Abs(fund.Income - localPay.Amount) > _options.Recon.FeeTolerance)
+            diffs.Add(Diff(ReconBizType.Fund, ReconDiffType.AmountMismatch, localPay.Amount, fund.Income, "资金账单收入 vs 本地支付成功金额"));
+        if (Math.Abs(fund.Refund - localRefund.Amount) > _options.Recon.FeeTolerance)
+            diffs.Add(Diff(ReconBizType.Fund, ReconDiffType.AmountMismatch, localRefund.Amount, fund.Refund, "资金账单退款支出 vs 本地退款成功金额"));
+        if (passage.Passage.FeeRateBp > 0)
+        {
+            var expected = (localPay.Amount - localRefund.Amount) * passage.Passage.FeeRateBp / 10_000;
+            if (Math.Abs(fund.Fee - expected) > _options.Recon.FeeTolerance)
+                diffs.Add(Diff(ReconBizType.Fee, ReconDiffType.AmountMismatch, expected, fund.Fee, $"资金账单手续费 vs 按费率 {passage.Passage.FeeRateBp / 100m:0.##}% 应收"));
+        }
+
+        await db.TransactionAsync(async (conn, tx) =>
+        {
+            await conn.ExecuteAsync("DELETE FROM pay_recon_diff WHERE batch_id = @BatchId", new { BatchId = batch.Id }, tx);
+            foreach (var diff in diffs) await Db.InsertAsync(conn, tx, diff);
+            await conn.ExecuteAsync(
+                """
+                UPDATE pay_recon_batch SET status = @status, upstream_pay_count = @payCount, upstream_pay_amount = @payAmount,
+                  upstream_refund_count = @refundCount, upstream_refund_amount = @refundAmount, upstream_fee_amount = @fee,
+                  fund_income = @income, fund_expense = @expense, fund_refund = @refund, fund_fee = @fee,
+                  local_pay_count = @payCount, local_pay_amount = @payAmount, local_refund_count = @refundCount, local_refund_amount = @refundAmount,
+                  diff_count = @total, error_msg = '', attempts = attempts + 1, next_run_at = NULL,
+                  finished_at = UTC_TIMESTAMP(3), updated_at = UTC_TIMESTAMP(3)
+                WHERE id = @Id
+                """,
+                new
+                {
+                    batch.Id, status = diffs.Count == 0 ? ReconStatus.Balanced : ReconStatus.HasDiff,
+                    payCount = localPay.Count, payAmount = localPay.Amount, refundCount = localRefund.Count, refundAmount = localRefund.Amount,
+                    income = fund.Income, expense = fund.Expense, refund = fund.Refund, fee = fund.Fee, total = diffs.Count,
+                }, tx);
+            return 0;
+        });
+        logger.LogInformation("资金账单核对 {Provider} 通道 {PassageId} {Date}：收入 {Income} 分，支出 {Expense} 分，手续费 {Fee} 分，差异 {Diff} 条",
+            batch.Provider, batch.PassageId, batch.BillDate, fund.Income, fund.Expense, fund.Fee, diffs.Count);
+    }
+
+    private sealed class AmountSum
+    {
+        public int Count { get; set; }
+        public long Amount { get; set; }
     }
 
     private async Task FailAsync(PayReconBatch batch, string message, bool final)

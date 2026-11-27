@@ -33,6 +33,8 @@ const form = reactive({
   openId: '',
   userId: '',
   subscribe: false,
+  signAgreement: false,
+  periodDays: 30,
 })
 
 const rules: FormRules = {
@@ -49,6 +51,16 @@ const rules: FormRules = {
     },
   ],
   subject: [{ required: true, message: '请输入商品标题', trigger: 'blur' }],
+  periodDays: [
+    {
+      validator: (_rule, _value, callback) => {
+        if (!Number.isInteger(form.periodDays) || form.periodDays < 1 || form.periodDays > 365) {
+          callback(new Error('扣款周期为 1~365 天'))
+        } else callback()
+      },
+      trigger: 'change',
+    },
+  ],
 }
 
 // ---------- 应用 → 渠道 → 支付方式 联动 ----------
@@ -115,9 +127,30 @@ const subscriptionSupported = computed(
   () => !!meta.getProvider(methodProvider.value)?.capabilities?.subscription,
 )
 
+/** 只有所选支付方式对应的支付类型支持签约代扣时，才展示签约开关 */
+const deductSupported = computed(() => !!meta.getProvider(methodProvider.value)?.capabilities?.deduct)
+
 watch(subscriptionSupported, (supported) => {
   if (!supported) form.subscribe = false
 })
+
+watch(deductSupported, (supported) => {
+  if (!supported) form.signAgreement = false
+})
+
+// 商店订阅由商店扣款，签约代扣由本系统扣款，二者互斥
+watch(
+  () => form.subscribe,
+  (on) => {
+    if (on) form.signAgreement = false
+  },
+)
+watch(
+  () => form.signAgreement,
+  (on) => {
+    if (on) form.subscribe = false
+  },
+)
 
 onMounted(() => meta.loadProviders())
 
@@ -155,6 +188,8 @@ async function submit() {
       openId: form.openId.trim(),
       userId: form.userId.trim(),
       subscribe: subscriptionSupported.value && form.subscribe,
+      signAgreement: deductSupported.value && form.signAgreement,
+      periodDays: deductSupported.value && form.signAgreement ? form.periodDays : 0,
     })
     result.value = res
     currentStatus.value = res.status
@@ -189,6 +224,11 @@ function setStatus(orderNo: string, status: OrderStatus, subNo: string | null) {
   }
 }
 
+/** 订阅首购（1）和签约单（3）支付 / 签约成功后都会建立订阅 */
+function isSubOrder(type: OrderType | undefined | null): boolean {
+  return type === 1 || type === 3
+}
+
 const refreshing = ref(false)
 
 async function refreshStatus(orderNo: string, silent = false) {
@@ -213,7 +253,11 @@ async function mockPay() {
   try {
     await ordersApi.mockPay(orderNo)
     const detail = await refreshStatus(orderNo, true)
-    if (detail.orderType === 1 && detail.subNo) {
+    if (detail.orderType === 3 && detail.subNo) {
+      ElMessage.success(`已模拟签约成功，代扣订阅 ${detail.subNo} 已创建`)
+    } else if (detail.orderType === 3) {
+      ElMessage.success('已模拟签约成功；订阅号尚未返回，稍后点「刷新状态」查看')
+    } else if (detail.orderType === 1 && detail.subNo) {
       ElMessage.success(`已模拟支付成功，订阅 ${detail.subNo} 已创建`)
     } else if (detail.orderType === 1) {
       ElMessage.success('已模拟支付成功；订阅号尚未返回，稍后点「刷新状态」查看')
@@ -331,12 +375,32 @@ function goBindings() {
               />
               <div class="form-help">
                 <template v-if="subscriptionSupported">
-                  打开后下的是「订阅首购」单：支付成功会创建一个订阅，之后每期续费由上游扣款事件生成续费单。
+                  打开后下的是「订阅首购」单：支付成功会创建一个订阅，之后每期续费由商店扣款并回调。
                 </template>
                 <template v-else-if="form.payMethod">
                   「{{ meta.providerName(methodProvider) }}」不支持自动续费订阅，只能下一次性支付单。
                 </template>
                 <template v-else>选择支持自动续费的支付方式后可用。</template>
+              </div>
+            </el-form-item>
+            <el-form-item v-if="deductSupported" label="签约代扣" prop="signAgreement">
+              <el-switch v-model="form.signAgreement" active-text="签约代扣" inactive-text="不签约" />
+              <div class="form-help">
+                打开后下的是「签约单」：签约成功会建立代扣订阅，之后由本系统按周期发起扣款。与上面的商店订阅互斥。
+              </div>
+              <div v-if="form.signAgreement" class="period-row">
+                <span class="period-row__label">扣款周期</span>
+                <el-input-number
+                  v-model="form.periodDays"
+                  :min="1"
+                  :max="365"
+                  :step="1"
+                  :precision="0"
+                  controls-position="right"
+                  style="width: 130px"
+                />
+                <span class="period-row__unit">天</span>
+                <span class="text-secondary text-small">默认 30 天</span>
               </div>
             </el-form-item>
             <el-form-item label="金额" prop="amount">
@@ -407,23 +471,30 @@ function goBindings() {
             </div>
 
             <el-alert
-              v-if="result.orderType === 1"
+              v-if="isSubOrder(result.orderType)"
               :type="currentSubNo ? 'success' : 'info'"
               show-icon
               :closable="false"
               class="block"
             >
               <template v-if="currentSubNo">
-                订阅已创建：
+                {{ result.orderType === 3 ? '代扣订阅已创建：' : '订阅已创建：' }}
                 <el-link type="primary" underline="never" class="mono" @click="openSubscription(currentSubNo)">
                   {{ currentSubNo }}
                 </el-link>
-                。演示通道可以在订阅详情里用「模拟事件」体验续费、退订、到期、撤销。
+                。{{ result.orderType === 3 ? '之后由本系统按周期发起扣款。' : '演示通道可以在订阅详情里用「模拟事件」体验续费、退订、到期、撤销。' }}
               </template>
               <template v-else-if="currentStatus === 0">
-                这是一笔订阅首购单，支付成功后会自动创建订阅{{ result.provider === 'mock' ? '；点右上角「模拟支付成功」即可' : '' }}。
+                <template v-if="result.orderType === 3">
+                  这是一笔签约单：签约成功后会自动创建代扣订阅{{ result.provider === 'mock' ? '；点右上角「模拟支付成功」即可' : '' }}。
+                </template>
+                <template v-else>
+                  这是一笔订阅首购单，支付成功后会自动创建订阅{{ result.provider === 'mock' ? '；点右上角「模拟支付成功」即可' : '' }}。
+                </template>
               </template>
-              <template v-else>这是一笔订阅首购单；订阅号尚未返回，可点「刷新状态」重试。</template>
+              <template v-else>
+                {{ result.orderType === 3 ? '这是一笔签约单' : '这是一笔订阅首购单' }}；订阅号尚未返回，可点「刷新状态」重试。
+              </template>
             </el-alert>
 
             <el-descriptions :column="2" border size="small" class="block">
@@ -468,7 +539,7 @@ function goBindings() {
                 >
                   {{ currentSubNo }}
                 </el-link>
-                <span v-else class="text-secondary">{{ result.orderType === 1 ? '支付成功后生成' : '-' }}</span>
+                <span v-else class="text-secondary">{{ isSubOrder(result.orderType) ? '成功后生成' : '-' }}</span>
               </el-descriptions-item>
               <el-descriptions-item label="凭据类型" :span="2">
                 <el-tag effect="plain">{{ result.credential?.type || '-' }}</el-tag>
@@ -617,6 +688,19 @@ function goBindings() {
 }
 .paid-at {
   margin-left: 8px;
+}
+.period-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  margin-top: 10px;
+}
+.period-row__label {
+  color: var(--el-text-color-regular);
+}
+.period-row__unit {
+  color: var(--el-text-color-regular);
 }
 .route-stats {
   display: flex;

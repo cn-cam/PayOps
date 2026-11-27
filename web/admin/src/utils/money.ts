@@ -36,3 +36,9 @@ export function formatLimit(fen: number | null | undefined, unlimitedText = '不
   if (!fen) return unlimitedText
   return formatMoney(fen)
 }
+
+/** 万分比手续费率：60 → "0.60%"；0 → "—"（表示不核对） */
+export function formatFeeRateBp(bp: number | null | undefined): string {
+  if (!bp) return '—'
+  return `${(bp / 100).toFixed(2)}%`
+}

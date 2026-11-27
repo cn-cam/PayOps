@@ -44,7 +44,7 @@ function viewDiffs(filter: { batchId: number; status?: ReconDiffStatus }) {
       <div class="toolbar">
         <div class="toolbar__title">
           对账是怎么运转的
-          <span class="toolbar__sub">拿上游账单和本地记录逐笔比对，找出掉单、多记和金额对不上的交易</span>
+          <span class="toolbar__sub">交易账单核对支付与退款，资金账单核对账户收支和手续费；只报告差异，不自动改账</span>
         </div>
       </div>
       <div class="flow-steps">
@@ -52,14 +52,14 @@ function viewDiffs(filter: { batchId: number; status?: ReconDiffStatus }) {
           <span class="flow-steps__no">1</span>
           <div>
             <div class="flow-steps__title">生成批次</div>
-            <div class="flow-steps__desc">每天自动为支持账单的通道生成昨日批次，也可以手动发起或重跑</div>
+            <div class="flow-steps__desc">每天自动为支持账单的通道生成昨日批次，交易账单与资金账单各一批，也可以手动发起或重跑</div>
           </div>
         </div>
         <div class="flow-steps__step">
           <span class="flow-steps__no">2</span>
           <div>
             <div class="flow-steps__title">下载并比对</div>
-            <div class="flow-steps__desc">后台下载上游对账单，与本地成功的支付、退款逐笔比对</div>
+            <div class="flow-steps__desc">下载交易账单或资金账单：交易逐笔比对支付、退款，资金核对收入、支出、退款与手续费</div>
           </div>
         </div>
         <div class="flow-steps__step">

@@ -9,13 +9,18 @@ public enum NotifyStatus { Pending = 0, Success = 1, Failed = 2 }
 public enum NotifyType { Pay = 1, Refund = 2, Subscription = 3 }
 
 /// <summary>订单类型：一次性支付、订阅首购、订阅续费（续费单由上游扣款事件生成，生来即为已支付）。</summary>
-public enum OrderType { OneTime = 0, SubscriptionInitial = 1, SubscriptionRenewal = 2 }
+public enum OrderType { OneTime = 0, SubscriptionInitial = 1, SubscriptionRenewal = 2, AgreementSign = 3 }
 
-public enum SubscriptionStatus { Active = 1, Expired = 2, Revoked = 3 }
+public enum SubscriptionStatus { Active = 1, Expired = 2, Revoked = 3, Paused = 4 }
+
+/// <summary>0 = 应用商店订阅（由商店扣款）；1 = 签约代扣（由本系统按周期发起扣款）。</summary>
+public enum SubscriptionMode { Store = 0, Deduct = 1 }
 
 public enum ReconStatus { Pending = 0, Balanced = 1, HasDiff = 2, Failed = 3 }
 
-public enum ReconBizType { Pay = 1, Refund = 2 }
+public enum ReconBizType { Pay = 1, Refund = 2, Fee = 3, Fund = 4 }
+
+public enum ReconKind { Trade = 1, Fund = 2 }
 
 public enum ReconDiffType { UpstreamOnly = 1, LocalOnly = 2, AmountMismatch = 3 }
 
@@ -62,6 +67,8 @@ public class PayPassage
     public string Provider { get; set; } = "";
     public string ConfigCipher { get; set; } = "";
     public int Status { get; set; } = 1;
+    /// <summary>手续费率（万分比，60 = 0.60%），0 表示不做手续费核对。</summary>
+    public int FeeRateBp { get; set; }
     public string Remark { get; set; } = "";
     public DateTime CreatedAt { get; set; }
     public DateTime UpdatedAt { get; set; }
@@ -120,6 +127,8 @@ public class PayOrder
     public string NotifyUrl { get; set; } = "";
     public string ReturnUrl { get; set; } = "";
     public string Attach { get; set; } = "";
+    /// <summary>下单附加参数 JSON（如代扣周期 periodDays）。</summary>
+    public string Extra { get; set; } = "";
     public string Credential { get; set; } = "";
     public string ErrorCode { get; set; } = "";
     public string ErrorMsg { get; set; } = "";
@@ -168,39 +177,57 @@ public class PaySubscription
     public string ChannelCode { get; set; } = "";
     public long PassageId { get; set; }
     public string Provider { get; set; } = "";
+    public SubscriptionMode Mode { get; set; }
     public string ProductId { get; set; } = "";
+    /// <summary>下一期生效的商品（降级、换购预约）。</summary>
+    public string NextProductId { get; set; } = "";
     public string UserId { get; set; } = "";
     public string UpstreamSubId { get; set; } = "";
     public string UpstreamToken { get; set; } = "";
+    /// <summary>上游当前生效的商品，便于对照本系统商品。</summary>
+    public string UpstreamProductId { get; set; } = "";
     public SubscriptionStatus Status { get; set; } = SubscriptionStatus.Active;
     public bool AutoRenew { get; set; } = true;
     public long Amount { get; set; }
     public DateTime? PeriodStart { get; set; }
     public DateTime? ExpiresAt { get; set; }
     public DateTime? CancelAt { get; set; }
+    public DateTime? PausedAt { get; set; }
     public int RenewCount { get; set; }
     public string FirstOrderNo { get; set; } = "";
     public string LastOrderNo { get; set; } = "";
     public string NotifyUrl { get; set; } = "";
     public string Attach { get; set; } = "";
     public DateTime? NextCheckAt { get; set; }
+    /// <summary>代扣模式下下次发起扣款的时间。</summary>
+    public DateTime? NextChargeAt { get; set; }
+    public int ChargeFailCount { get; set; }
+    /// <summary>代扣周期（天）。</summary>
+    public int ChargeIntervalDays { get; set; } = 30;
     public int CheckCount { get; set; }
     public DateTime CreatedAt { get; set; }
     public DateTime UpdatedAt { get; set; }
 }
 
-/// <summary>对账批次：每个通道每个账单日一条。</summary>
+/// <summary>对账批次：每个通道每个账单日一条（交易账单、资金账单各一条）。</summary>
 public class PayReconBatch
 {
     public long Id { get; set; }
     public long PassageId { get; set; }
     public string Provider { get; set; } = "";
     public string BillDate { get; set; } = "";
+    public ReconKind Kind { get; set; }
     public ReconStatus Status { get; set; }
     public int UpstreamPayCount { get; set; }
     public long UpstreamPayAmount { get; set; }
     public int UpstreamRefundCount { get; set; }
     public long UpstreamRefundAmount { get; set; }
+    public long UpstreamFeeAmount { get; set; }
+    public long ExpectedFeeAmount { get; set; }
+    public long FundIncome { get; set; }
+    public long FundExpense { get; set; }
+    public long FundRefund { get; set; }
+    public long FundFee { get; set; }
     public int LocalPayCount { get; set; }
     public long LocalPayAmount { get; set; }
     public int LocalRefundCount { get; set; }

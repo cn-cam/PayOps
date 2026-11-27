@@ -63,6 +63,24 @@
 - 把"下载"和"解析"分开，解析写成 `public static List<BillItem> ParseBill(string csv)` 以便单测；用 `BillCsv.Rows` 按**表头名**取列（各家都可能增减列），`BillCsv.Decode` 处理 UTF-8/GBK，`BillCsv.Gunzip` 处理压缩，`BillCsv.Fen` 把元转分。
 - 只把终态成功的退款行计入（账单里的退款状态是出账时的快照）。
 
+## 签约代扣能力（`Capabilities.Deduct`）
+
+- 签约单：`CreateAsync` 收到 `ctx.SignAgreement` 时返回拉起签约的凭据（不产生支付）；上游的签约通知上报 `NotifyEvent { Type = Agreement, OrderNo = 签约单号, Agreement = { AgreementId, PayerId, SignedAt, Signed } }`，服务层据此把签约单置为成功并建立 `mode = 1` 的订阅。
+- 扣款：`DeductAsync`，同步成功返回 `Paid = true`（支付宝可拿到 `trade_no`）；只返回"受理"的（微信 `pappayapply`、抖音 `deduct/payapply`）必须返回 `Paid = false`，由扣款结果通知（`Subscription/Charged`）入账。
+- 解约：`CancelAgreementAsync`。查询：`QuerySubscriptionAsync`。
+- 注意各家的枚举陷阱：微信 `contract_state=0` 已签约、抖音 `contract_status=0` 已签约（语义不同别写反）。
+- 参考实现：`MockProvider`（含签约/事件模拟）与 `WechatProvider` 的 v2 部分（`Common/WechatV2.cs`）。
+
+## 资金账单（`Capabilities.FundBill`）
+
+- `DownloadFundBillAsync` 返回 `FundBillSummary { Income, Expense, Refund, Fee }`（分，收入/支出均为正数）。手续费在资金账单里是独立行：扣除交易手续费 = 支出、退还交易手续费 = 收入。
+- 用 `BillCsv.Rows(..., stopFirstField: "资金流水总笔数")` 按表头名解析，`BillCsv.Gunzip/Decode` 处理压缩与编码。
+- 支付宝资金账单（`bill_type=signcustomer`）官方未公开列定义，因此不实现（`FundBill = false`）。
+
+## 手续费
+
+- 交易账单的每行手续费放进 `BillItem.Fee`（保留上游正负号：支付为正、退款为负）。通道上配置 `fee_rate_bp` 后，`ReconService` 会按"金额 × 费率"算应收并与上游合计比较；容差 `PayOps:Recon:FeeTolerance`。
+
 ## 通用工具（`Providers/Common/ProviderBase.cs`）
 
 `KeyUtil`（RSA 加载/签名/验签，支持 PEM 与裸 Base64、MD5、Base64Url）、`JsonExt`（`Str` / `Long` / `Obj` 宽松取值）、`TimeUtil`（北京时间互转、Unix 时间）、`Money`（分 ↔ 元字符串）、`SendAsync`（统一网络异常）。

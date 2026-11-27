@@ -57,6 +57,15 @@ public abstract class PayProviderBase(IHttpClientFactory httpFactory) : IPayProv
     public virtual Task<List<BillItem>> DownloadBillAsync(BillContext ctx, CancellationToken ct) =>
         throw new ProviderException("NOT_SUPPORTED", $"{Meta.Name}不支持下载对账单", requestFault: true);
 
+    public virtual Task<FundBillSummary> DownloadFundBillAsync(BillContext ctx, CancellationToken ct) =>
+        throw new ProviderException("NOT_SUPPORTED", $"{Meta.Name}不支持下载资金账单", requestFault: true);
+
+    public virtual Task<DeductResult> DeductAsync(DeductContext ctx, CancellationToken ct) =>
+        throw new ProviderException("NOT_SUPPORTED", $"{Meta.Name}不支持签约代扣", requestFault: true);
+
+    public virtual Task CancelAgreementAsync(SubscriptionContext ctx, CancellationToken ct) =>
+        throw new ProviderException("NOT_SUPPORTED", $"{Meta.Name}不支持服务端解约", requestFault: true);
+
     public abstract Task<NotifyParseResult> ParseNotifyAsync(NotifyContext ctx, CancellationToken ct);
 
     public virtual NotifyReply BuildReply(NotifyOutcome outcome, string message) =>

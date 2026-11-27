@@ -23,6 +23,9 @@ public sealed class TestOrderRequest
     public string? OpenId { get; set; }
     public string? UserId { get; set; }
     public bool Subscribe { get; set; }
+    public bool SignAgreement { get; set; }
+    /// <summary>签约代扣的扣款周期（天），默认 30。</summary>
+    public int PeriodDays { get; set; }
 }
 
 [Route("api/admin/orders")]
@@ -94,7 +97,8 @@ public sealed class OrdersController(
     {
         var order = await RequireAsync(orderNo);
         if (order.Provider != MockProvider.ProviderCode) throw new PayException(ErrorCodes.NotSupported, "仅模拟通道订单支持模拟支付");
-        if (order.Status != OrderStatus.Pending) throw new PayException(ErrorCodes.OrderStateError, "仅待支付订单可模拟支付");
+        // 签约单：回放签约回调，建立代扣订阅（订单此时变为"已签约"）
+        if (order.Status != OrderStatus.Pending) throw new PayException(ErrorCodes.OrderStateError, "仅待支付/待签约订单可模拟");
         var passage = await cache.GetPassageAsync(order.PassageId) ?? throw new PayException(ErrorCodes.PassageError, "订单通道不存在");
 
         var reply = await upstream.HandleAsync(new UpstreamNotifyRequest
@@ -116,7 +120,7 @@ public sealed class OrdersController(
     /// <summary>订阅首购订单要回放下单凭据里那份带订阅信息的回调；一次性订单直接构造即可。</summary>
     private static string MockCallbackBody(PayOrder order, string secret)
     {
-        if (order.OrderType == OrderType.SubscriptionInitial && !string.IsNullOrEmpty(order.Credential))
+        if (order.OrderType is OrderType.SubscriptionInitial or OrderType.AgreementSign && !string.IsNullOrEmpty(order.Credential))
         {
             using var doc = System.Text.Json.JsonDocument.Parse(order.Credential);
             if (doc.RootElement.TryGetProperty("data", out var data) && data.TryGetProperty("body", out var body) && body.GetString() is { Length: > 0 } stored)
@@ -142,6 +146,8 @@ public sealed class OrdersController(
             OpenId = request.OpenId ?? "",
             UserId = request.UserId ?? "",
             Subscribe = request.Subscribe,
+            SignAgreement = request.SignAgreement,
+            Extra = request.PeriodDays > 0 ? new Dictionary<string, string> { ["periodDays"] = request.PeriodDays.ToString() } : null,
             ClientIp = HttpContext.ClientIp(),
         }, ct);
         await AuditAsync("测试下单", result.OrderNo, new { request.ChannelCode, request.PayMethod, request.Amount, result.PassageName });

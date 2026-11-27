@@ -29,7 +29,7 @@ public sealed partial class HonorProvider(IHttpClientFactory httpFactory) : PayP
         Name = "荣耀应用内支付",
         Category = "store",
         Methods = [new("honor_iap", "荣耀IAP")],
-        Capabilities = new() { ReceiptVerify = true, Subscription = true, SubscriptionCancel = true },
+        Capabilities = new() { ReceiptVerify = true, Subscription = true, SubscriptionCancel = true, SubscriptionChange = true },
         ConfigFields =
         [
             new() { Key = "appId", Label = "应用AppID", Required = true },
@@ -82,7 +82,9 @@ public sealed partial class HonorProvider(IHttpClientFactory httpFactory) : PayP
             // 解约后已付费周期内仍应有效：以周期结束时间为准
             Active = q.State == UpstreamState.Paid && (s.AutoRenew || s.ExpiresAt is null || s.ExpiresAt > DateTime.UtcNow),
             Revoked = q.State == UpstreamState.Refunded,
+            Paused = !s.AutoRenew && s.ExpiresAt is { } expiry && expiry <= DateTime.UtcNow,
             AutoRenew = s.AutoRenew,
+            ProductId = s.ProductId,
             PeriodStart = s.PeriodStart,
             ExpiresAt = s.ExpiresAt,
             LatestTradeNo = q.UpstreamTradeNo,
@@ -162,6 +164,15 @@ public sealed partial class HonorProvider(IHttpClientFactory httpFactory) : PayP
         if (eventCode == 2001)
             return NotifyParseResult.Of(new NotifyEvent { Type = NotifyEventType.Subscription, SubKind = SubscriptionEventKind.AutoRenewOff, Subscription = info });
 
+        // 2004：订阅升级/换购，立即生效
+        if (eventCode == 2004)
+            return NotifyParseResult.Of(new NotifyEvent
+            {
+                Type = NotifyEventType.Subscription, SubKind = SubscriptionEventKind.Upgraded,
+                UpstreamTradeNo = data.Str("orderId") is { Length: > 0 } upgradedNo ? upgradedNo : q.UpstreamTradeNo,
+                ProductId = q.ProductId, Subscription = info,
+            });
+
         if (q.State != UpstreamState.Paid) return NotifyParseResult.Ignore($"购买状态 {q.Message}");
         // 续费回调是否带有独立订单号官方未说明：优先取回调里的 orderId 作为本期交易号
         var tradeNo = data.Str("orderId") is { Length: > 0 } id ? id : q.UpstreamTradeNo;
@@ -230,6 +241,8 @@ public sealed partial class HonorProvider(IHttpClientFactory httpFactory) : PayP
                     ExpiresAt = ParseTime(sub.Value.Str("subEndTime")),
                     AutoRenew = sub.Value.Long("subscriptionState") == 1,
                     Amount = Money.FromYuan(d.Str("payMoney")),
+                    ProductId = d.Str("productId"),
+                    
                 }
                 : null,
         };

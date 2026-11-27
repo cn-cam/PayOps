@@ -23,14 +23,18 @@ public sealed class AlipayProvider(IHttpClientFactory httpFactory) : PayProvider
             new("alipay_wap", "支付宝手机网站支付"),
             new("alipay_page", "支付宝电脑网站支付"),
             new("alipay_qr", "支付宝扫码支付"),
+            new("alipay_agreement", "支付宝周期扣款（商家扣款/签约代扣）"),
         ],
-        Capabilities = new() { Query = true, Close = true, Refund = true, Bill = true },
+        Capabilities = new() { Query = true, Close = true, Refund = true, Bill = true, Deduct = true },
         ConfigFields =
         [
             new() { Key = "appId", Label = "应用AppID", Required = true },
             new() { Key = "privateKey", Label = "应用私钥", Type = "textarea", Required = true, Secret = true, Help = "PKCS8 / PKCS1，PEM 或裸 Base64 均可" },
             new() { Key = "alipayPublicKey", Label = "支付宝公钥", Type = "textarea", Required = true, Help = "开放平台「接口加签方式-公钥模式」下查看的支付宝公钥（不是应用公钥）" },
             new() { Key = "gateway", Label = "网关地址", DefaultValue = DefaultGateway, Help = "沙箱：https://openapi-sandbox.dl.alipaydev.com/gateway.do" },
+            new() { Key = "signScene", Label = "协议场景码（sign_scene）", Help = "商家扣款产品审核通过后由支付宝配置。不配置则不支持签约代扣" },
+            new() { Key = "personalProductCode", Label = "个人签约产品码", DefaultValue = "GENERAL_WITHHOLDING_P", Help = "周期扣款旧产品为 CYCLE_PAY_AUTH_P" },
+            new() { Key = "periodDays", Label = "签约周期（天）", Type = "number", DefaultValue = "30" },
         ],
         NotifyNote = "回调地址在下单时自动传给支付宝，无需在开放平台单独配置。当前实现为公钥模式，暂不支持证书模式。",
     };
@@ -44,6 +48,8 @@ public sealed class AlipayProvider(IHttpClientFactory httpFactory) : PayProvider
 
     public override async Task<PayCredential> CreateAsync(CreateContext ctx, CancellationToken ct)
     {
+        if (ctx.SignAgreement) return CreateAgreement(ctx);
+
         var (apiMethod, productCode) = ctx.Method switch
         {
             "alipay_app" => ("alipay.trade.app.pay", "QUICK_MSECURITY_PAY"),
@@ -198,6 +204,8 @@ public sealed class AlipayProvider(IHttpClientFactory httpFactory) : PayProvider
         foreach (var row in BillCsv.Rows(csv, ["商户订单号", "业务类型"]))
         {
             var amount = Math.Abs(BillCsv.Fen(row.GetValueOrDefault("订单金额（元）") ?? row.GetValueOrDefault("订单金额(元)", "0")));
+            // 服务费（手续费）：支付宝业务账单里的"服务费（元）"，订单为正、退款为负
+            var fee = Money.FromYuan(row.GetValueOrDefault("服务费（元）") ?? row.GetValueOrDefault("服务费(元)", ""));
             switch (row["业务类型"])
             {
                 case "交易":
@@ -207,6 +215,7 @@ public sealed class AlipayProvider(IHttpClientFactory httpFactory) : PayProvider
                         OrderNo = row["商户订单号"],
                         UpstreamTradeNo = row.GetValueOrDefault("支付宝交易号", ""),
                         Amount = amount,
+                        Fee = fee,
                     });
                     break;
                 case "退款":
@@ -217,6 +226,7 @@ public sealed class AlipayProvider(IHttpClientFactory httpFactory) : PayProvider
                         UpstreamTradeNo = row.GetValueOrDefault("支付宝交易号", ""),
                         RefundNo = row.GetValueOrDefault("退款批次号/请求号") ?? row.GetValueOrDefault("退款批次号", ""),
                         Amount = amount,
+                        Fee = fee,
                     });
                     break;
             }
@@ -227,6 +237,36 @@ public sealed class AlipayProvider(IHttpClientFactory httpFactory) : PayProvider
     public override Task<NotifyParseResult> ParseNotifyAsync(NotifyContext ctx, CancellationToken ct)
     {
         var form = ctx.Form.Count > 0 ? ctx.Form : ctx.Query;
+        // 签约/解约通知（notify_type=dut_user_sign / dut_user_unsign）
+        var notifyType = form.TryGetValue("notify_type", out var nt) ? nt : "";
+        if (notifyType.StartsWith("dut_user_", StringComparison.Ordinal))
+        {
+            if (!form.TryGetValue("sign", out var agreementSign) || agreementSign.Length == 0)
+                return Task.FromResult(NotifyParseResult.Fail("缺少 sign"));
+            var agreementContent = string.Join('&', form
+                .Where(kv => kv.Key is not ("sign" or "sign_type") && kv.Value.Length > 0)
+                .OrderBy(kv => kv.Key, StringComparer.Ordinal)
+                .Select(kv => $"{kv.Key}={kv.Value}"));
+            if (!KeyUtil.RsaVerify(ctx.Config.Require("alipayPublicKey"), agreementContent, agreementSign, HashAlgorithmName.SHA256))
+                return Task.FromResult(NotifyParseResult.Fail("验签失败"));
+            if (Value(form, "app_id") is { Length: > 0 } notifyAppId && notifyAppId != ctx.Config.Require("appId"))
+                return Task.FromResult(NotifyParseResult.Fail("app_id 不匹配"));
+            var signed = notifyType == "dut_user_sign";
+            return Task.FromResult(NotifyParseResult.Of(new NotifyEvent
+            {
+                Type = NotifyEventType.Agreement,
+                // external_agreement_no 即签约单号（本系统订单号）
+                OrderNo = signed ? Value(form, "external_agreement_no") : "",
+                Agreement = new AgreementInfo
+                {
+                    AgreementId = Value(form, "agreement_no"),
+                    PayerId = Value(form, "alipay_open_id") is { Length: > 0 } openId ? openId : Value(form, "alipay_user_id"),
+                    SignedAt = TimeUtil.ParseBeijing(Value(form, "sign_time"), TimeFormat),
+                    Signed = signed,
+                    Message = Value(form, "status"),
+                },
+            }));
+        }
         if (!form.TryGetValue("sign", out var sign) || sign.Length == 0)
             return Task.FromResult(NotifyParseResult.Fail("缺少 sign"));
         var content = string.Join('&', form
@@ -257,6 +297,80 @@ public sealed class AlipayProvider(IHttpClientFactory httpFactory) : PayProvider
     private static string FirstNonEmpty(string a, string b) => a.Length > 0 ? a : b;
 
     private static string Gateway(PassageConfig cfg) => cfg.Get("gateway", DefaultGateway);
+
+    // ------------------------------------------------------------------ 签约代扣
+
+    /// <summary>签约：alipay.user.agreement.page.sign（页面跳转）。协议号只能从异步通知或查询获得。</summary>
+    private static PayCredential CreateAgreement(CreateContext ctx)
+    {
+        var cfg = ctx.Config;
+        var biz = new Dictionary<string, object>
+        {
+            ["personal_product_code"] = cfg.Get("personalProductCode", AlipayAgreement.PersonalProductCode),
+            ["product_code"] = AlipayAgreement.ProductCode,
+            ["sign_scene"] = cfg.Require("signScene"),
+            ["external_agreement_no"] = ctx.OrderNo,
+            ["access_params"] = new { channel = "ALIPAYAPP" },
+            ["period_rule_params"] = new
+            {
+                period_type = "DAY",
+                period = Math.Clamp(cfg.GetInt("periodDays", 30), 1, 365),
+                single_amount = Money.ToYuan(ctx.Amount),
+                execute_time = TimeUtil.BeijingString(ctx.ExpireAt, "yyyy-MM-dd"),
+            },
+        };
+        var parameters = BuildParams(cfg, "alipay.user.agreement.page.sign", JsonSerializer.Serialize(biz), ctx.NotifyUrl, ctx.ReturnUrl);
+        return new PayCredential { Type = CredentialTypes.RedirectUrl, Data = { ["url"] = Gateway(cfg) + "?" + ToQuery(parameters), ["clientApi"] = "协议页跳转" } };
+    }
+
+    /// <summary>扣款：alipay.trade.pay + agreement_params（product_code=GENERAL_WITHHOLDING）。单笔上限 100 元。</summary>
+    public override async Task<DeductResult> DeductAsync(DeductContext ctx, CancellationToken ct)
+    {
+        const string api = "alipay.trade.pay";
+        var biz = JsonSerializer.Serialize(new
+        {
+            out_trade_no = ctx.OrderNo,
+            total_amount = Money.ToYuan(ctx.Amount),
+            subject = Truncate(ctx.Subject, 128),
+            product_code = AlipayAgreement.ProductCode,
+            agreement_params = new { agreement_no = ctx.AgreementId },
+        });
+        var resp = await PostAsync(ctx.Config, BuildParams(ctx.Config, api, biz, ctx.NotifyUrl), api, ct);
+        if (resp.Str("code") != "10000")
+            throw Upstream(FirstNonEmpty(resp.Str("sub_code"), resp.Str("code")), $"支付宝扣款失败：{FirstNonEmpty(resp.Str("sub_msg"), resp.Str("msg"))}");
+        var tradeNo = resp.Str("trade_no");
+        return new DeductResult
+        {
+            Paid = tradeNo.Length > 0,
+            UpstreamTradeNo = tradeNo.Length > 0 ? tradeNo : null,
+            PaidAt = TimeUtil.ParseBeijing(resp.Str("gmt_payment"), TimeFormat) ?? DateTime.UtcNow,
+            Message = tradeNo.Length > 0 ? "扣款成功" : "扣款已受理，等待异步通知/查询",
+        };
+    }
+
+    /// <summary>查询协议：status NORMAL 生效 / TEMP 未生效。</summary>
+    public override async Task<SubscriptionState> QuerySubscriptionAsync(SubscriptionContext ctx, CancellationToken ct)
+    {
+        const string api = "alipay.user.agreement.query";
+        var resp = await PostAsync(ctx.Config, BuildParams(ctx.Config, api, JsonSerializer.Serialize(new { agreement_no = ctx.UpstreamSubId })), api, ct);
+        EnsureSuccess(resp, "支付宝协议查询失败");
+        var status = resp.Str("status");
+        var active = status == "NORMAL";
+        return new SubscriptionState
+        {
+            Known = true, Active = active, Revoked = !active, AutoRenew = active, Message = $"status={status}",
+        };
+    }
+
+    /// <summary>解约：alipay.user.agreement.unsign。</summary>
+    public override async Task CancelAgreementAsync(SubscriptionContext ctx, CancellationToken ct)
+    {
+        const string api = "alipay.user.agreement.unsign";
+        var resp = await PostAsync(ctx.Config,
+            BuildParams(ctx.Config, api, JsonSerializer.Serialize(new { agreement_no = ctx.UpstreamSubId, operate_type = "confirm" })), api, ct);
+        EnsureSuccess(resp, "支付宝解约失败");
+    }
+
 
     public static SortedDictionary<string, string> BuildParams(PassageConfig cfg, string method, string bizContent, string notifyUrl = "", string returnUrl = "")
     {

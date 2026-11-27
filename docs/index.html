@@ -93,8 +93,9 @@
     <div class="card"><h3>原生多副本</h3><p>网关、后台、Worker 全部无状态、不选主。任务用 SKIP LOCKED + 租约领取，再经 RabbitMQ 竞争消费，副本可随意增减。</p></div>
     <div class="card"><h3>入账幂等</h3><p>条件更新只成功一次；上游交易号唯一键防一证多用；回调验签后还要校验订单属于该通道；金额不一致拒绝入账。</p></div>
     <div class="card"><h3>事务发件箱</h3><p>订单状态与业务通知同事务写入，至少一次投递，9 档退避重试；同时发布 MQ 领域事件供内部系统订阅。</p></div>
-    <div class="card"><h3>自动续费订阅</h3><p>华为 / 荣耀 / 苹果：首购、续订、退订、恢复、到期、撤销全链路。每期扣款一笔独立订单，到期巡检兜底。</p></div>
-    <div class="card"><h3>对账</h3><p>每日下载微信 / 支付宝 / 抖音支付账单，与本地支付、退款逐笔勾对；差异分三类，人工处理留痕。</p></div>
+    <div class="card"><h3>自动续费订阅</h3><p>华为 / 荣耀 / 苹果 / 小米：首购、续订、退订、恢复、到期、撤销，以及升级、降级、暂停。每期扣款一笔独立订单，到期巡检兜底。</p></div>
+    <div class="card"><h3>签约代扣</h3><p>微信（v2 委托代扣）、支付宝（商家扣款）、抖音（免密支付）：签约、按周期扣款、失败退避、解约，由本系统发起扣款。</p></div>
+    <div class="card"><h3>对账与手续费</h3><p>每日下载交易账单与资金账单，逐笔勾对支付、退款，并按通道费率核对手续费；差异分四类，人工处理留痕。</p></div>
     <div class="card"><h3>掉单补偿</h3><p>待支付订单递进式主动查单；超时关单前先查上游；关单后迟到的成功回调仍会入账。</p></div>
     <div class="card"><h3>安全</h3><p>接入方 HMAC 签名 + 防重放；通道凭证 AES-256-GCM 落库加密；后台三级角色与操作审计。</p></div>
   </div>
@@ -102,7 +103,7 @@
 
 <section id="providers"><div class="wrap">
   <h2>支付类型</h2>
-  <p class="sub">新增一种支付类型只需实现一个接口并注册一行，后台表单与路由自动生效。</p>
+  <p class="sub">新增一种支付类型只需实现一个接口并注册一行，后台表单与路由自动生效。微信 / 支付宝 / 抖音另支持签约代扣（自有渠道周期扣款）。</p>
   <table>
     <tr><th>类型</th><th>支付方式</th><th>查单</th><th>退款</th><th>订阅</th><th>对账</th></tr>
     <tr><td>微信支付</td><td>APP / JSAPI·小程序 / 扫码 / H5</td><td class="c">✓</td><td class="c">✓</td><td></td><td class="c">✓</td></tr>
@@ -112,7 +113,8 @@
     <tr><td>华为应用内支付</td><td>IAP</td><td></td><td></td><td class="c">✓</td><td></td></tr>
     <tr><td>荣耀应用内支付</td><td>IAP</td><td></td><td></td><td class="c">✓</td><td></td></tr>
     <tr><td>苹果应用内购买</td><td>StoreKit 2</td><td></td><td></td><td class="c">✓</td><td></td></tr>
-    <tr><td>OPPO / vivo / 小米</td><td>联运 SDK 支付</td><td>vivo·小米</td><td></td><td></td><td></td></tr>
+    <tr><td>小米应用内支付</td><td>联运 SDK / 自动续费订阅</td><td class="c">✓</td><td></td><td class="c">✓</td><td></td></tr>
+    <tr><td>OPPO / vivo</td><td>联运 SDK 支付（官方无订阅产品）</td><td>vivo</td><td></td><td></td><td></td></tr>
   </table>
   <div class="note">各真实支付类型按官方文档实现并有验签/解析单元测试，但尚未使用真实商户凭证联调。上线前请逐个通道走通真实交易。</div>
 </div></section>

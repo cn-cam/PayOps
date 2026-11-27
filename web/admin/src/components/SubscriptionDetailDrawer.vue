@@ -17,6 +17,7 @@ import {
   ORDER_STATUS,
   ORDER_TYPE,
   SUBSCRIPTION_MOCK_EVENTS,
+  SUBSCRIPTION_MODE,
   SUBSCRIPTION_STATUS,
   enumLabel,
 } from '@/utils/enums'
@@ -71,9 +72,18 @@ watch(
 )
 
 const providerMeta = computed(() => meta.getProvider(sub.value?.provider))
-/** 元数据未加载到时按"支持"处理，交给后端判断 */
-const cancelSupported = computed(() => providerMeta.value?.capabilities?.subscriptionCancel !== false)
-const canCancel = computed(() => sub.value?.status === 1 && sub.value?.autoRenew === true)
+const isDeduct = computed(() => sub.value?.mode === 1)
+/** 签约代扣由本系统直接解约，不依赖商店的「服务端退订」能力 */
+const cancelSupported = computed(
+  () => isDeduct.value || providerMeta.value?.capabilities?.subscriptionCancel !== false,
+)
+/** 已暂停的订阅也可以退订（终止协议 / 关闭续订） */
+const canCancel = computed(
+  () => !!sub.value && (sub.value.status === 1 || sub.value.status === 4) && sub.value.autoRenew === true,
+)
+const canCharge = computed(
+  () => isDeduct.value && sub.value?.status === 1 && sub.value?.autoRenew === true,
+)
 const isMock = computed(() => sub.value?.provider === 'mock')
 const expiry = computed(() => (sub.value ? expiryInfo(sub.value) : { level: 'ended' as const, text: '' }))
 
@@ -101,11 +111,26 @@ function sync() {
   })
 }
 
+async function charge() {
+  const amount = formatMoney(sub.value?.amount)
+  const tip = `将从用户签约的支付账户扣款 ${amount}；扣款成功会生成一笔「订阅续费」单并顺延当前周期。确定立即扣款吗？`
+  if (!(await confirmAction(tip, '立即扣款'))) return
+  await run('charge', async () => {
+    const res = await subscriptionsApi.charge(props.subNo)
+    const text = res.message || (res.changed ? '扣款成功' : '未产生新的扣款')
+    if (res.changed) ElMessage.success(`${text}（当前：${enumLabel(SUBSCRIPTION_STATUS, res.status)}）`)
+    else ElMessage.info(text)
+    await afterChange()
+  })
+}
+
 async function cancel() {
   const name = meta.providerName(sub.value?.provider)
-  const tip = cancelSupported.value
-    ? '退订后不再自动扣费，订阅在当前周期结束前仍然有效，到期后失效。确定退订吗？'
-    : `「${name}」不支持服务端退订，只能由用户本人在应用商店的订阅管理里退订。继续的话后端会返回具体的引导说明，不会改动订阅。仍要尝试吗？`
+  const tip = isDeduct.value
+    ? '退订会终止代扣协议，之后不再自动扣款；当前周期结束前订阅仍然有效。确定退订吗？'
+    : cancelSupported.value
+      ? '退订后不再自动扣费，订阅在当前周期结束前仍然有效，到期后失效。确定退订吗？'
+      : `「${name}」不支持服务端退订，只能由用户本人在应用商店的订阅管理里退订。继续的话后端会返回具体的引导说明，不会改动订阅。仍要尝试吗？`
   if (!(await confirmAction(tip, '退订'))) return
   await run('cancel', async () => {
     try {
@@ -118,15 +143,29 @@ async function cancel() {
       }
       throw err
     }
-    ElMessage.success('已退订，当前周期结束后失效')
+    ElMessage.success(isDeduct.value ? '已解约，之后不再自动扣款' : '已退订，当前周期结束后失效')
     await afterChange()
   })
 }
 
 async function mockEvent(event: SubscriptionMockEvent) {
   const option = SUBSCRIPTION_MOCK_EVENTS.find((e) => e.value === event)
+  let productId = ''
+  if (event === 'upgrade') {
+    // 升级需要指定新商品；默认用当前商品 + _plus，方便演示
+    const base = sub.value?.productId ? `${sub.value.productId}_plus` : ''
+    const input = await ElMessageBox.prompt('升级到哪个商品？本期立即生效。', '模拟升级', {
+      inputValue: base,
+      inputPlaceholder: '商品 ID',
+      confirmButtonText: '确定',
+      cancelButtonText: '取消',
+      inputValidator: (value: string) => (value && value.trim() ? true : '请输入商品 ID'),
+    }).catch(() => null)
+    if (!input) return
+    productId = input.value.trim()
+  }
   await run('mock', async () => {
-    await subscriptionsApi.mockEvent(props.subNo, event)
+    await subscriptionsApi.mockEvent(props.subNo, event, productId || undefined)
     ElMessage.success(`已模拟事件：${option?.label ?? event}`)
     if (event === 'renew') activeTab.value = 'orders'
     await afterChange()
@@ -179,6 +218,7 @@ function viewNotify(row: NotifyTaskItem) {
         <span class="mono drawer-head__no">{{ subNo }}</span>
         <el-button link type="primary" :icon="CopyDocument" @click="copyText(subNo)" />
         <template v-if="sub">
+          <EnumTag :options="SUBSCRIPTION_MODE" :value="sub.mode" effect="plain" />
           <EnumTag :options="SUBSCRIPTION_STATUS" :value="sub.status" effect="dark" />
           <EnumTag v-if="sub.status === 1" :options="AUTO_RENEW" :value="sub.autoRenew" effect="plain" />
         </template>
@@ -193,6 +233,9 @@ function viewNotify(row: NotifyTaskItem) {
           <template v-if="auth.canWrite">
             <el-tooltip content="向商店查询并同步：补记续费、同步续订开关、确认过期 / 撤销" placement="top">
               <el-button type="primary" plain :loading="acting === 'sync'" @click="sync">同步</el-button>
+            </el-tooltip>
+            <el-tooltip v-if="canCharge" content="签约代扣：本系统立即向用户发起一次扣款" placement="top">
+              <el-button type="warning" plain :loading="acting === 'charge'" @click="charge">立即扣款</el-button>
             </el-tooltip>
             <el-button v-if="canCancel" type="danger" plain :loading="acting === 'cancel'" @click="cancel">
               退订
@@ -217,11 +260,27 @@ function viewNotify(row: NotifyTaskItem) {
         </div>
 
         <el-alert
+          v-if="sub.status === 4"
+          type="warning"
+          show-icon
+          :closable="false"
+          :title="`已暂停${sub.pausedAt ? `（${formatTime(sub.pausedAt)}）` : ''}：暂停期间不扣款，恢复后继续按周期扣费。`"
+          class="block"
+        />
+        <el-alert
           v-if="sub.status === 1 && !sub.autoRenew"
           type="warning"
           show-icon
           :closable="false"
           :title="`已退订${sub.cancelAt ? `（${formatTime(sub.cancelAt)}）` : ''}：不再自动扣费，订阅在 ${formatTime(sub.expiresAt)} 前仍然有效。`"
+          class="block"
+        />
+        <el-alert
+          v-if="isDeduct && sub.status === 1"
+          type="info"
+          show-icon
+          :closable="false"
+          :title="`签约代扣：本系统按周期发起扣款${sub.nextChargeAt ? `，下次扣款 ${formatTime(sub.nextChargeAt)}` : ''}${sub.chargeFailCount > 0 ? `；已连续失败 ${sub.chargeFailCount} 次` : ''}。`"
           class="block"
         />
         <el-alert
@@ -267,11 +326,18 @@ function viewNotify(row: NotifyTaskItem) {
           <el-descriptions-item label="状态">
             <EnumTag :options="SUBSCRIPTION_STATUS" :value="sub.status" size="small" />
           </el-descriptions-item>
+          <el-descriptions-item label="模式">
+            <EnumTag :options="SUBSCRIPTION_MODE" :value="sub.mode" size="small" effect="plain" />
+            <span v-if="isDeduct" class="text-secondary text-small gap-left">本系统按周期扣款</span>
+          </el-descriptions-item>
           <el-descriptions-item label="续订">
             <EnumTag :options="AUTO_RENEW" :value="sub.autoRenew" size="small" effect="plain" />
             <span v-if="sub.cancelAt" class="text-secondary text-small gap-left">
               退订于 {{ formatTime(sub.cancelAt) }}
             </span>
+          </el-descriptions-item>
+          <el-descriptions-item v-if="sub.pausedAt" label="暂停时间">
+            {{ formatTime(sub.pausedAt) }}
           </el-descriptions-item>
           <el-descriptions-item label="应用">
             <span class="mono">{{ sub.appCode }}</span>
@@ -291,6 +357,10 @@ function viewNotify(row: NotifyTaskItem) {
           <el-descriptions-item label="商品 ID">
             <span class="mono">{{ sub.productId || '-' }}</span>
           </el-descriptions-item>
+          <el-descriptions-item v-if="sub.nextProductId" label="下一期商品">
+            <span class="mono">{{ sub.nextProductId }}</span>
+            <span class="text-secondary text-small gap-left">下一期生效</span>
+          </el-descriptions-item>
           <el-descriptions-item label="用户 ID">
             <span class="mono">{{ sub.userId || '-' }}</span>
           </el-descriptions-item>
@@ -301,6 +371,15 @@ function viewNotify(row: NotifyTaskItem) {
           <el-descriptions-item label="当前周期开始">{{ formatTime(sub.periodStart) }}</el-descriptions-item>
           <el-descriptions-item label="当前周期到期">
             <span :class="`expiry--${expiry.level}`">{{ formatTime(sub.expiresAt) }}</span>
+          </el-descriptions-item>
+          <el-descriptions-item v-if="isDeduct" label="下次扣款">
+            <span v-if="sub.status === 4" class="text-warning">已暂停，恢复后继续</span>
+            <span v-else-if="!sub.autoRenew" class="text-secondary">已退订，不再扣款</span>
+            <span v-else-if="sub.nextChargeAt">{{ formatTime(sub.nextChargeAt) }}</span>
+            <span v-else class="text-secondary">—</span>
+            <span v-if="sub.chargeFailCount > 0" class="text-danger text-small gap-left">
+              连续失败 {{ sub.chargeFailCount }} 次
+            </span>
           </el-descriptions-item>
           <el-descriptions-item label="首购单">
             <el-link
@@ -381,7 +460,7 @@ function viewNotify(row: NotifyTaskItem) {
                 <template #default="{ row }">{{ formatTime(row.paidAt || row.createdAt) }}</template>
               </el-table-column>
             </el-table>
-            <div class="form-help">每期续费都会生成一笔「订阅续费」订单（由上游扣款事件生成，生来已支付）；退款请到对应订单详情操作。</div>
+            <div class="form-help">每期续费都会生成一笔「订阅续费」订单（商店订阅由上游扣款事件生成，签约代扣由本系统扣款后入账）；退款请到对应订单详情操作。</div>
           </el-tab-pane>
 
           <el-tab-pane :label="`订阅通知（${sub.notifyTasks?.length ?? 0}）`" name="notifyTasks">

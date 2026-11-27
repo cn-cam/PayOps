@@ -22,4 +22,4 @@ labels:
 images:
   - name: payops
     newName: payops
-    newTag: 1.1.1
+    newTag: 1.2.0

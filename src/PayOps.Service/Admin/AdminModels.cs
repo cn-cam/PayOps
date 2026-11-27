@@ -67,6 +67,8 @@ public class PassageItem
     public string Remark { get; set; } = "";
     public int BindingCount { get; set; }
     public string NotifyUrl { get; set; } = "";
+    /// <summary>手续费率（万分比），0 = 不核对。</summary>
+    public int FeeRateBp { get; set; }
     public DateTime CreatedAt { get; set; }
     public DateTime UpdatedAt { get; set; }
 }
@@ -81,6 +83,8 @@ public class PassageInput
     public string Name { get; set; } = "";
     public string Provider { get; set; } = "";
     public int Status { get; set; } = 1;
+    /// <summary>手续费率（万分比），0 = 不核对。</summary>
+    public int FeeRateBp { get; set; }
     public string Remark { get; set; } = "";
     public Dictionary<string, string>? Config { get; set; }
 }
@@ -229,7 +233,9 @@ public class SubscriptionItem
     public long PassageId { get; set; }
     public string PassageName { get; set; } = "";
     public string Provider { get; set; } = "";
+    public SubscriptionMode Mode { get; set; }
     public string ProductId { get; set; } = "";
+    public string NextProductId { get; set; } = "";
     public string UserId { get; set; } = "";
     public string UpstreamSubId { get; set; } = "";
     public SubscriptionStatus Status { get; set; }
@@ -238,6 +244,9 @@ public class SubscriptionItem
     public DateTime? PeriodStart { get; set; }
     public DateTime? ExpiresAt { get; set; }
     public DateTime? CancelAt { get; set; }
+    public DateTime? PausedAt { get; set; }
+    public DateTime? NextChargeAt { get; set; }
+    public int ChargeFailCount { get; set; }
     public int RenewCount { get; set; }
     public string FirstOrderNo { get; set; } = "";
     public string LastOrderNo { get; set; } = "";
@@ -261,6 +270,7 @@ public class SubscriptionQuery : PageQuery
     public long? AppId { get; set; }
     public string? Provider { get; set; }
     public int? Status { get; set; }
+    public int? Mode { get; set; }
     public bool? AutoRenew { get; set; }
     public string? UserId { get; set; }
     public string? ProductId { get; set; }
@@ -276,11 +286,18 @@ public class ReconBatchItem
     public string Provider { get; set; } = "";
     public string ProviderName { get; set; } = "";
     public string BillDate { get; set; } = "";
+    public ReconKind Kind { get; set; }
     public ReconStatus Status { get; set; }
     public int UpstreamPayCount { get; set; }
     public long UpstreamPayAmount { get; set; }
     public int UpstreamRefundCount { get; set; }
     public long UpstreamRefundAmount { get; set; }
+    public long UpstreamFeeAmount { get; set; }
+    public long ExpectedFeeAmount { get; set; }
+    public long FundIncome { get; set; }
+    public long FundExpense { get; set; }
+    public long FundRefund { get; set; }
+    public long FundFee { get; set; }
     public int LocalPayCount { get; set; }
     public long LocalPayAmount { get; set; }
     public int LocalRefundCount { get; set; }
@@ -301,6 +318,7 @@ public class ReconBatchQuery
     public long? PassageId { get; set; }
     public string? Provider { get; set; }
     public int? Status { get; set; }
+    public int? Kind { get; set; }
     public string? StartDate { get; set; }
     public string? EndDate { get; set; }
 }

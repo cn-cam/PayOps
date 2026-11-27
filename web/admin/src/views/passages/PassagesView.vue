@@ -13,6 +13,7 @@ import ProviderSelect from '@/components/ProviderSelect.vue'
 import TablePager from '@/components/TablePager.vue'
 import { confirmAction, copyText } from '@/utils/common'
 import { ENABLE_STATUS } from '@/utils/enums'
+import { formatFeeRateBp } from '@/utils/money'
 import { formatTime } from '@/utils/time'
 import PassageDrawer from './PassageDrawer.vue'
 
@@ -92,6 +93,7 @@ async function changeStatus(row: PassageItem, value: EnableStatus) {
     await passagesApi.update(row.id, {
       name: detail.name,
       status: value,
+      feeRateBp: detail.feeRateBp ?? 0,
       remark: detail.remark ?? '',
       config: detail.config ?? {},
     })
@@ -213,6 +215,22 @@ async function remove(row: PassageItem) {
             <EnumTag v-else :options="ENABLE_STATUS" :value="row.status" />
           </template>
         </el-table-column>
+        <el-table-column label="手续费率" width="100" align="right">
+          <template #default="{ row }">
+            <el-tooltip
+              :content="
+                row.feeRateBp
+                  ? `万分比 ${row.feeRateBp}，用于手续费核对`
+                  : '未配置费率，对账时不做手续费核对'
+              "
+              placement="top"
+            >
+              <span class="fee-rate" :class="{ 'text-secondary': !row.feeRateBp }">
+                {{ formatFeeRateBp(row.feeRateBp) }}
+              </span>
+            </el-tooltip>
+          </template>
+        </el-table-column>
         <el-table-column label="绑定渠道数" width="100" align="center">
           <template #default="{ row }">
             <el-tag :type="row.bindingCount > 0 ? 'primary' : 'info'" effect="plain" round>
@@ -324,6 +342,11 @@ async function remove(row: PassageItem) {
 <style scoped>
 .passage-name {
   font-weight: 600;
+}
+.fee-rate {
+  font-variant-numeric: tabular-nums;
+  font-weight: 500;
+  cursor: help;
 }
 .cap-tags {
   display: inline-flex;

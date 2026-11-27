@@ -25,7 +25,7 @@ public sealed class AppleProvider(IHttpClientFactory httpFactory) : PayProviderB
         Name = "苹果应用内购买",
         Category = "store",
         Methods = [new("apple_iap", "Apple IAP")],
-        Capabilities = new() { ReceiptVerify = true, Subscription = true },
+        Capabilities = new() { ReceiptVerify = true, Subscription = true, SubscriptionChange = true },
         ConfigFields =
         [
             new() { Key = "bundleId", Label = "Bundle ID", Required = true, Placeholder = "com.example.app" },
@@ -137,7 +137,8 @@ public sealed class AppleProvider(IHttpClientFactory httpFactory) : PayProviderB
 
         var type = payload.Str("notificationType");
         var subtype = payload.Str("subtype");
-        if (type is not ("ONE_TIME_CHARGE" or "REFUND" or "SUBSCRIBED" or "DID_RENEW" or "DID_CHANGE_RENEWAL_STATUS" or "EXPIRED" or "GRACE_PERIOD_EXPIRED" or "REVOKE"))
+        if (type is not ("ONE_TIME_CHARGE" or "REFUND" or "SUBSCRIBED" or "DID_RENEW" or "DID_CHANGE_RENEWAL_STATUS" or "DID_CHANGE_RENEWAL_PREF"
+            or "EXPIRED" or "GRACE_PERIOD_EXPIRED" or "REVOKE"))
             return Task.FromResult(NotifyParseResult.Ignore($"忽略通知类型 {type}"));
         var data = payload.Obj("data");
         if (data is null) return Task.FromResult(NotifyParseResult.Ignore("缺少 data"));
@@ -158,6 +159,21 @@ public sealed class AppleProvider(IHttpClientFactory httpFactory) : PayProviderB
 
         var result = new NotifyParseResult { Verified = true };
         var isSubscription = q.Subscription is not null;
+        // 续订信息里的下一期商品用于降级预约；解析失败不影响主流程
+        var nextProductId = "";
+        var autoRenew = true;
+        if (data.Value.Str("signedRenewalInfo") is { Length: > 0 } renewalJws)
+        {
+            try
+            {
+                var renewal = AppleJws.VerifyAndDecode(renewalJws);
+                nextProductId = renewal.Str("autoRenewProductId");
+                autoRenew = (renewal.Long("autoRenewStatus") ?? 1) == 1;
+            }
+            catch (ProviderException)
+            {
+            }
+        }
         switch (type)
         {
             case "ONE_TIME_CHARGE":
@@ -172,7 +188,26 @@ public sealed class AppleProvider(IHttpClientFactory httpFactory) : PayProviderB
 
             case "SUBSCRIBED" or "DID_RENEW" when isSubscription:
                 // 首购与续订统一上报为"一次成功扣款"，由服务层按订阅是否已存在区分
-                result.Events.Add(SubscriptionEvent(SubscriptionEventKind.Charged, q));
+                var productId = q.ProductId ?? "";
+                result.Events.Add(new NotifyEvent
+                {
+                    Type = NotifyEventType.Subscription,
+                    SubKind = SubscriptionEventKind.Charged,
+                    OrderNo = q.BoundOrderNo is { } bound && !bound.StartsWith("apple-token:", StringComparison.Ordinal) ? bound : "",
+                    UpstreamTradeNo = q.UpstreamTradeNo,
+                    PaidAt = q.PaidAt,
+                    ProductId = productId,
+                    Subscription = new SubscriptionInfo
+                    {
+                        UpstreamSubId = q.Subscription!.UpstreamSubId,
+                        PeriodStart = q.Subscription.PeriodStart,
+                        ExpiresAt = q.Subscription.ExpiresAt,
+                        AutoRenew = autoRenew,
+                        Amount = q.Subscription.Amount,
+                        ProductId = productId,
+                        NextProductId = nextProductId == productId ? "" : nextProductId,
+                    },
+                });
                 break;
 
             case "DID_CHANGE_RENEWAL_STATUS" when isSubscription:
@@ -180,6 +215,33 @@ public sealed class AppleProvider(IHttpClientFactory httpFactory) : PayProviderB
                     return Task.FromResult(NotifyParseResult.Ignore($"忽略续订状态子类型 {subtype}"));
                 result.Events.Add(SubscriptionEvent(
                     subtype == "AUTO_RENEW_DISABLED" ? SubscriptionEventKind.AutoRenewOff : SubscriptionEventKind.AutoRenewOn, q));
+                break;
+
+            case "DID_CHANGE_RENEWAL_PREF" when isSubscription:
+                // UPGRADE：立即生效，本期商品已变；DOWNGRADE：下一期生效；无 subtype：撤销降级
+                if (subtype == "UPGRADE")
+                {
+                    result.Events.Add(SubscriptionEvent(SubscriptionEventKind.Upgraded, q));
+                }
+                else
+                {
+                    result.Events.Add(new NotifyEvent
+                    {
+                        Type = NotifyEventType.Subscription,
+                        SubKind = SubscriptionEventKind.Downgraded,
+                        UpstreamTradeNo = q.UpstreamTradeNo,
+                        ProductId = q.ProductId ?? "",
+                        Subscription = new SubscriptionInfo
+                        {
+                            UpstreamSubId = q.Subscription!.UpstreamSubId,
+                            // 撤销降级时把预约商品清空，回落到本期商品
+                            NextProductId = subtype == "DOWNGRADE" ? nextProductId : "",
+                            ProductId = q.ProductId ?? "",
+                            ExpiresAt = q.Subscription.ExpiresAt,
+                            AutoRenew = autoRenew,
+                        },
+                    });
+                }
                 break;
 
             case "EXPIRED" or "GRACE_PERIOD_EXPIRED" when isSubscription:

@@ -31,8 +31,9 @@ public sealed class DouyinProvider(IHttpClientFactory httpFactory) : PayProvider
             new("douyin_app", "抖音APP支付"),
             new("douyin_h5", "抖音H5支付"),
             new("douyin_pc", "抖音PC扫码支付(Native)"),
+            new("douyin_deduct", "抖音免密支付/商户代扣（签约代扣）"),
         ],
-        Capabilities = new() { Query = true, Close = true, Refund = true, Bill = true },
+        Capabilities = new() { Query = true, Close = true, Refund = true, Bill = true, FundBill = true, Deduct = true },
         ConfigFields =
         [
             new() { Key = "appId", Label = "应用AppID", Required = true, Help = "与商户号绑定的抖音开放平台应用：APP 支付填移动应用 AppID；H5 / PC 扫码填网站应用 AppID。两类应用请各建一个通道" },
@@ -41,6 +42,7 @@ public sealed class DouyinProvider(IHttpClientFactory httpFactory) : PayProvider
             new() { Key = "privateKey", Label = "商户API私钥", Type = "textarea", Required = true, Secret = true, Help = "PKCS#8 / PKCS#1，PEM 或裸 Base64" },
             new() { Key = "apiKey", Label = "接口加密密钥", Type = "password", Required = true, Secret = true, Help = "32 位对称密钥，用于回调与平台证书解密；未设置时抖音可能不发送回调" },
             new() { Key = "platformCert", Label = "抖音支付平台证书", Type = "textarea", Help = "PEM 格式，用于回调验签。留空则自动调用平台证书下载接口获取并缓存（证书轮换时自动跟随）" },
+            new() { Key = "planId", Label = "代扣模板ID（plan_id）", Help = "商家平台免密支付/商户代扣模板，审核通过后获得。仅签约代扣需要" },
         ],
         NotifyNote = "回调地址在下单/退款时自动携带（须 HTTPS 且不带参数）。H5 支付要求发起跳转的页面域名已配置为 H5 支付域名；PC 扫码二维码 2 分钟内有效，过期请用相同参数重新下单刷新。",
     };
@@ -61,6 +63,7 @@ public sealed class DouyinProvider(IHttpClientFactory httpFactory) : PayProvider
     {
         var cfg = ctx.Config;
         var appId = cfg.Require("appId");
+        if (ctx.SignAgreement) return await CreateAgreementAsync(ctx, ct);
         var kind = ctx.Method switch
         {
             "douyin_app" => "app",
@@ -128,7 +131,105 @@ public sealed class DouyinProvider(IHttpClientFactory httpFactory) : PayProvider
         };
     }
 
-    /// <summary>App 调起支付签名：应用id\n时间戳\n随机串\n预支付会话ID\n，商户私钥 SHA256withRSA。</summary>
+    // ------------------------------------------------------------------ 签约代扣
+
+    /// <summary>独立签约：POST /v1/agreementauth/preentrustweb → pre_entrustweb_id（2 小时有效）。</summary>
+    private async Task<PayCredential> CreateAgreementAsync(CreateContext ctx, CancellationToken ct)
+    {
+        var cfg = ctx.Config;
+        var body = JsonSerializer.Serialize(new
+        {
+            mchid = cfg.Require("mchId"),
+            appid = cfg.Require("appId"),
+            out_contract_code = ctx.OrderNo,
+            plan_id = cfg.Require("planId"),
+            request_serial = long.Parse(DateTimeOffset.UtcNow.ToUnixTimeSeconds().ToString() + Random.Shared.Next(100, 999)),
+            contract_display_account = Truncate(ctx.Subject, 32),
+            notify_url = ctx.NotifyUrl,
+        });
+        var (status, text) = await CallAsync(cfg, HttpMethod.Post, "/v1/agreementauth/preentrustweb", body, ct);
+        var json = ParseJson(text, Meta.Name);
+        if (status is < 200 or >= 300) throw Upstream(json.Str("code"), $"抖音预签约失败：{json.Str("message")}");
+
+        var id = json.Str("pre_entrustweb_id");
+        var ts = DateTimeOffset.UtcNow.ToUnixTimeSeconds().ToString();
+        var nonce = Guid.NewGuid().ToString("N");
+        return new PayCredential
+        {
+            Type = CredentialTypes.SdkParams,
+            Data =
+            {
+                ["appid"] = cfg.Require("appId"),
+                ["partnerid"] = cfg.Require("mchId"),
+                ["pre_entrustweb_id"] = id,
+                ["package"] = "Sign",
+                ["noncestr"] = nonce,
+                ["timestamp"] = ts,
+                // 调起签名：appid\ntimestamp\nnoncestr\npre_entrustweb_id\n
+                ["sign"] = KeyUtil.RsaSign(cfg.Require("privateKey"), $"{cfg.Require("appId")}\n{ts}\n{nonce}\n{id}\n", HashAlgorithmName.SHA256),
+                ["clientApi"] = "DouyinPayOpenSDK.Sign",
+            },
+        };
+    }
+
+    /// <summary>申请扣款：POST /v1/deduct/payapply（trade_type=SGP 商户代扣）。只代表受理。</summary>
+    public override async Task<DeductResult> DeductAsync(DeductContext ctx, CancellationToken ct)
+    {
+        var cfg = ctx.Config;
+        var body = JsonSerializer.Serialize(new
+        {
+            mchid = cfg.Require("mchId"),
+            appid = cfg.Require("appId"),
+            contract_id = ctx.AgreementId,
+            trade_type = "SGP",
+            out_trade_no = ctx.OrderNo,
+            amount = new { total = ctx.Amount, currency = "CNY" },
+            description = Truncate(ctx.Subject, 127),
+            notify_url = ctx.NotifyUrl,
+        });
+        var (status, text) = await CallAsync(cfg, HttpMethod.Post, "/v1/deduct/payapply", body, ct);
+        var json = ParseJson(text, Meta.Name);
+        if (status is < 200 or >= 300)
+            throw Upstream(json.Str("code"), $"抖音扣款失败：{json.Str("message")}");
+        return new DeductResult { Paid = false, Message = "已受理，等待扣款结果通知" };
+    }
+
+    /// <summary>查询签约：contract_status 0 已签约 / 1 已解约（与微信的语义相反）。</summary>
+    public override async Task<SubscriptionState> QuerySubscriptionAsync(SubscriptionContext ctx, CancellationToken ct)
+    {
+        var body = JsonSerializer.Serialize(new
+        {
+            mchid = ctx.Config.Require("mchId"),
+            appid = ctx.Config.Require("appId"),
+            contract_id = ctx.UpstreamSubId,
+        });
+        var (status, text) = await CallAsync(ctx.Config, HttpMethod.Post, "/v1/member/querycontract", body, ct);
+        var json = ParseJson(text, Meta.Name);
+        if (status is < 200 or >= 300) throw Upstream(json.Str("code"), $"抖音签约查询失败：{json.Str("message")}");
+        var signed = json.Str("contract_status") == "0";
+        return new SubscriptionState
+        {
+            Known = true, Active = signed, Revoked = !signed, AutoRenew = signed,
+            Message = $"contract_status={json.Str("contract_status")}",
+        };
+    }
+
+    /// <summary>解约：POST /v1/member/deletecontract。</summary>
+    public override async Task CancelAgreementAsync(SubscriptionContext ctx, CancellationToken ct)
+    {
+        var body = JsonSerializer.Serialize(new
+        {
+            mchid = ctx.Config.Require("mchId"),
+            appid = ctx.Config.Require("appId"),
+            contract_id = ctx.UpstreamSubId,
+            contract_termination_remark = "商户发起解约",
+        });
+        var (status, text) = await CallAsync(ctx.Config, HttpMethod.Post, "/v1/member/deletecontract", body, ct);
+        var json = ParseJson(text, Meta.Name);
+        if (status is < 200 or >= 300) throw Upstream(json.Str("code"), $"抖音解约失败：{json.Str("message")}");
+    }
+
+    /// <summary>App 调起支付签名：应用id\n时间戳\n非随机串\n预支付会话ID\n，商户私钥 SHA256withRSA。</summary>
     public static string AppSign(string privateKey, string appId, string timestamp, string nonce, string prepayId) =>
         KeyUtil.RsaSign(privateKey, $"{appId}\n{timestamp}\n{nonce}\n{prepayId}\n", HashAlgorithmName.SHA256);
 
@@ -238,6 +339,27 @@ public sealed class DouyinProvider(IHttpClientFactory httpFactory) : PayProvider
         }
         if (data.Str("mchid") != cfg.Require("mchId")) return NotifyParseResult.Fail("商户号不匹配");
 
+        // 签约 / 解约通知
+        var eventType = root.Str("event_type");
+        if (eventType is "CONTRACTADD.SUCCESS" or "CONTRACTDELETE.SUCCESS")
+        {
+            var signed = eventType == "CONTRACTADD.SUCCESS";
+            var contractCode = data.Str("out_contract_code");
+            return NotifyParseResult.Of(new NotifyEvent
+            {
+                Type = NotifyEventType.Agreement,
+                OrderNo = signed ? contractCode : "",
+                Agreement = new AgreementInfo
+                {
+                    AgreementId = data.Str("contract_id"),
+                    PayerId = data.Str("openid"),
+                    SignedAt = (data.Long("operate_time") ?? data.Long("contract_signed_time")) is { } t and > 0 ? TimeUtil.FromUnixSeconds(t) : DateTime.UtcNow,
+                    Signed = signed,
+                    Message = data.Str("change_type"),
+                },
+            });
+        }
+
         if (root.Str("event_type").StartsWith("REFUND.", StringComparison.Ordinal))
         {
             var refundStatus = data.Str("refund_status");
@@ -256,6 +378,21 @@ public sealed class DouyinProvider(IHttpClientFactory httpFactory) : PayProvider
 
         var q = ToQueryResult(data);
         if (q.State != UpstreamState.Paid) return NotifyParseResult.Ignore($"交易状态 {data.Str("trade_state")}");
+        // 代扣扣款结果：带 contract_id 且没有商户订单号绑定的，按订阅扣款处理
+        if (data.Str("contract_id") is { Length: > 0 } contractId)
+        {
+            return NotifyParseResult.Of(new NotifyEvent
+            {
+                Type = NotifyEventType.Subscription,
+                SubKind = SubscriptionEventKind.Charged,
+                OrderNo = "",
+                UpstreamTradeNo = data.Str("transaction_id"),
+                Amount = data.Obj("amount")?.Long("total"),
+                PaidAt = DateTimeOffset.TryParse(data.Str("success_time"), out var paid) ? paid.UtcDateTime : null,
+                BuyerId = data.Obj("payer")?.Str("openid") ?? "",
+                Subscription = new SubscriptionInfo { UpstreamSubId = contractId, Token = data.Str("out_trade_no") },
+            });
+        }
         return NotifyParseResult.Of(new NotifyEvent
         {
             Type = NotifyEventType.Paid,
@@ -396,6 +533,7 @@ public sealed class DouyinProvider(IHttpClientFactory httpFactory) : PayProvider
                         OrderNo = row["商户订单号"],
                         UpstreamTradeNo = row.GetValueOrDefault("抖音支付订单号", ""),
                         Amount = BillCsv.Fen(row["订单金额"]),
+                        Fee = Money.FromYuan(row.GetValueOrDefault("手续费", "")),
                     });
                     break;
                 case "REFUND":
@@ -408,11 +546,68 @@ public sealed class DouyinProvider(IHttpClientFactory httpFactory) : PayProvider
                         UpstreamTradeNo = row.GetValueOrDefault("抖音支付退款单号", ""),
                         RefundNo = row.GetValueOrDefault("商户退款单号", ""),
                         Amount = BillCsv.Fen(row.GetValueOrDefault("退款金额", "0")),
+                        Fee = Money.FromYuan(row.GetValueOrDefault("手续费", "")),
                     });
                     break;
             }
         }
         return items;
+    }
+
+    /// <summary>资金账单：GET /v1/bill/fundflowbill（账户收支与手续费，金额单位元）。</summary>
+    public override async Task<FundBillSummary> DownloadFundBillAsync(BillContext ctx, CancellationToken ct)
+    {
+        var cfg = ctx.Config;
+        var path = $"/v1/bill/fundflowbill?mchid={cfg.Require("mchId")}&account_type=BaseAccount&bill_date={ctx.BillDate:yyyy-MM-dd}&tar_type=GZIP";
+        var (status, text) = await CallAsync(cfg, HttpMethod.Get, path, "", ct);
+        var json = ParseJson(text, Meta.Name);
+        if (status is < 200 or >= 300)
+        {
+            if (json.Str("code") == "NO_STATEMENT_EXIST") return new FundBillSummary();
+            throw Upstream(json.Str("code"), $"申请抖音资金账单失败：{json.Str("message")}");
+        }
+
+        var url = new Uri(json.Str("download_url"));
+        using var req = new HttpRequestMessage(HttpMethod.Get, url);
+        req.Headers.TryAddWithoutValidation("Authorization", Scheme + " " + BuildAuthorization(cfg, "GET", url.PathAndQuery, ""));
+        var (downloadStatus, body) = await SendBytesAsync(req, ct);
+        if (downloadStatus is < 200 or >= 300) throw Upstream("BILL_DOWNLOAD", $"下载抖音资金账单失败：HTTP {downloadStatus}");
+        return ParseFundBill(BillCsv.Decode(BillCsv.Gunzip(body)));
+    }
+
+    /// <summary>解析资金账单：按"收支类型"汇总收入/支出，业务类型含手续费的行单独汇总。</summary>
+    public static FundBillSummary ParseFundBill(string csv)
+    {
+        long income = 0, expense = 0, refund = 0, fee = 0;
+        var rows = 0;
+        foreach (var row in BillCsv.Rows(csv, ["收支类型", "收支金额（元）"], stopFirstField: "资金流水总笔数"))
+        {
+            rows++;
+            var amount = BillCsv.Fen(row.GetValueOrDefault("收支金额（元）", "0"));
+            var direction = row["收支类型"];
+            var bizType = row.GetValueOrDefault("业务类型", "");
+            if (direction == "收入") income += amount;
+            else expense += amount;
+            if (bizType.Contains("手续费", StringComparison.Ordinal))
+                fee += direction == "支出" ? amount : -amount;
+            else if (bizType.Contains("退款", StringComparison.Ordinal))
+                refund += amount;
+        }
+        return new FundBillSummary { Income = income, Expense = expense, Refund = refund, Fee = fee, Message = $"共 {rows} 行" };
+    }
+
+    private async Task<(int Status, byte[] Body)> SendBytesAsync(HttpRequestMessage request, CancellationToken ct)
+    {
+        try
+        {
+            using var resp = await Http.SendAsync(request, ct);
+            return ((int)resp.StatusCode, await resp.Content.ReadAsByteArrayAsync(ct));
+        }
+        catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException or IOException)
+        {
+            if (ct.IsCancellationRequested) throw;
+            throw new ProviderException("UPSTREAM_UNREACHABLE", $"抖音支付网络异常：{ex.Message}", inner: ex);
+        }
     }
 
     // ------------------------------------------------------------------ 请求签名

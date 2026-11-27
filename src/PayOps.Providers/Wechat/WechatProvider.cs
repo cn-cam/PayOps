@@ -22,8 +22,9 @@ public sealed class WechatProvider(IHttpClientFactory httpFactory) : PayProvider
             new("wechat_jsapi", "微信JSAPI/小程序支付"),
             new("wechat_native", "微信扫码支付"),
             new("wechat_h5", "微信H5支付"),
+            new("wechat_papay", "微信免密支付/自动续费（签约代扣）"),
         ],
-        Capabilities = new() { Query = true, Close = true, Refund = true, Bill = true },
+        Capabilities = new() { Query = true, Close = true, Refund = true, Bill = true, FundBill = true, Deduct = true },
         ConfigFields =
         [
             new() { Key = "appId", Label = "AppID", Required = true, Placeholder = "wx...", Help = "与商户号绑定的开放平台/公众号/小程序 AppID" },
@@ -33,8 +34,10 @@ public sealed class WechatProvider(IHttpClientFactory httpFactory) : PayProvider
             new() { Key = "apiV3Key", Label = "APIv3密钥", Type = "password", Required = true, Secret = true, Help = "32 位，用于回调解密" },
             new() { Key = "platformPublicKey", Label = "微信支付公钥/平台证书", Type = "textarea", Required = true, Help = "PEM 格式，用于回调验签；支持微信支付公钥或平台证书" },
             new() { Key = "platformSerial", Label = "公钥ID/平台证书序列号", Help = "使用微信支付公钥时填写 PUB_KEY_ID_ 开头的公钥ID；填写后会校验回调的 Wechatpay-Serial" },
+            new() { Key = "apiV2Key", Label = "APIv2密钥（仅代扣需要）", Type = "password", Secret = true, Help = "微信免密支付/委托代扣只有 v2 接口，需要 APIv2 密钥做 MD5 签名。不配置则不支持签约代扣" },
+            new() { Key = "planId", Label = "委托代扣模板ID（plan_id）", Help = "商户平台 → 交易中心 → 高级业务 → 委托代扣模板管理，审核通过后获得。免密支付与自动续费是不同模板" },
         ],
-        NotifyNote = "回调地址在下单时自动传给微信，无需在商户平台单独配置；需保证域名已备案且为 HTTPS。",
+        NotifyNote = "支付/退款回调地址在下单时自动携带。签约与解约通知发到签约时传入的 notify_url（免密支付需在模板里配置解约通知地址），落点是本通道回调地址。",
     };
 
     protected override string? ValidateKeys(PassageConfig config)
@@ -57,6 +60,8 @@ public sealed class WechatProvider(IHttpClientFactory httpFactory) : PayProvider
             _ => throw BadRequest($"微信支付不支持的支付方式：{ctx.Method}"),
         };
         if (kind == "jsapi" && ctx.OpenId.Length == 0) throw BadRequest("JSAPI/小程序支付必须传 openId");
+
+        if (ctx.SignAgreement) return await CreateAgreementAsync(ctx, ct);
 
         var body = new Dictionary<string, object?>
         {
@@ -195,6 +200,9 @@ public sealed class WechatProvider(IHttpClientFactory httpFactory) : PayProvider
     public override Task<NotifyParseResult> ParseNotifyAsync(NotifyContext ctx, CancellationToken ct)
     {
         var cfg = ctx.Config;
+        // 免密支付/委托代扣只有 v2 的 XML 回调
+        if (ctx.Body.TrimStart().StartsWith("<xml", StringComparison.OrdinalIgnoreCase))
+            return Task.FromResult(ParseV2Notify(cfg, ctx.Body));
         var timestamp = Header(ctx, "Wechatpay-Timestamp");
         var nonce = Header(ctx, "Wechatpay-Nonce");
         var signature = Header(ctx, "Wechatpay-Signature");
@@ -255,6 +263,204 @@ public sealed class WechatProvider(IHttpClientFactory httpFactory) : PayProvider
         }));
     }
 
+    /// <summary>
+    /// APP 预签约：POST /papay/preentrustweb（v2 XML）→ pre_entrustweb_id，客户端 2 分钟内用
+    /// 小程序拉起（userName=miniprogram_username, path=miniprogram_path）。
+    /// </summary>
+    private async Task<PayCredential> CreateAgreementAsync(CreateContext ctx, CancellationToken ct)
+    {
+        var cfg = ctx.Config;
+        var apiV2Key = cfg.Require("apiV2Key");
+        var parameters = new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            ["appid"] = cfg.Require("appId"),
+            ["mch_id"] = cfg.Require("mchId"),
+            ["plan_id"] = cfg.Require("planId"),
+            ["contract_code"] = ctx.OrderNo,
+            ["request_serial"] = ctx.OrderNo,
+            ["contract_display_account"] = Truncate(ctx.Subject, 32),
+            ["notify_url"] = ctx.NotifyUrl,
+            ["version"] = "1.0",
+            ["timestamp"] = DateTimeOffset.UtcNow.ToUnixTimeSeconds().ToString(),
+            ["nonce_str"] = Guid.NewGuid().ToString("N"),
+            ["return_app"] = "Y",
+        };
+        parameters["sign"] = WechatV2.Sign(parameters, apiV2Key);
+
+        using var req = new HttpRequestMessage(HttpMethod.Post, WechatV2.Host + "/papay/preentrustweb")
+        {
+            Content = new StringContent(WechatV2.ToXml(parameters), Encoding.UTF8, "text/xml"),
+        };
+        var (_, text) = await SendAsync(req, ct);
+        var result = WechatV2.ParseXml(text);
+        if (result.GetValueOrDefault("return_code", "") != "SUCCESS" || result.GetValueOrDefault("result_code", "") != "SUCCESS")
+            throw Upstream(result.GetValueOrDefault("err_code", "WX_V2"), $"微信预签约失败：{result.GetValueOrDefault("err_code_des", result.GetValueOrDefault("return_msg", ""))}");
+        if (!WechatV2.Verify(result, apiV2Key)) throw new ProviderException("WX_V2_SIGN", "微信预签约应答验签失败");
+
+        return new PayCredential
+        {
+            Type = CredentialTypes.SdkParams,
+            Data =
+            {
+                ["preEntrustwebId"] = result.GetValueOrDefault("pre_entrustweb_id", ""),
+                ["miniprogramUsername"] = result.GetValueOrDefault("miniprogram_username", ""),
+                ["miniprogramPath"] = result.GetValueOrDefault("miniprogram_path", ""),
+                ["clientApi"] = "WXLaunchMiniProgram",
+                ["expiresInSeconds"] = 120,
+            },
+        };
+    }
+
+    /// <summary>代扣：POST /pay/pappayapply（v2）。只代表受理，最终结果以扣款结果通知或查询为准。</summary>
+    public override async Task<DeductResult> DeductAsync(DeductContext ctx, CancellationToken ct)
+    {
+        var cfg = ctx.Config;
+        var apiV2Key = cfg.Require("apiV2Key");
+        var p = new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            ["appid"] = cfg.Require("appId"),
+            ["mch_id"] = cfg.Require("mchId"),
+            ["nonce_str"] = Guid.NewGuid().ToString("N"),
+            ["body"] = Truncate(ctx.Subject, 32),
+            ["out_trade_no"] = ctx.OrderNo,
+            ["total_fee"] = ctx.Amount.ToString(),
+            ["spbill_create_ip"] = "127.0.0.1",
+            ["notify_url"] = ctx.NotifyUrl,
+            ["trade_type"] = "PAP",
+            ["contract_id"] = ctx.AgreementId,
+        };
+        p["sign"] = WechatV2.Sign(p, apiV2Key);
+        var result = await PostV2Async(p, "/pay/pappayapply", apiV2Key, ct);
+        var accepted = result.GetValueOrDefault("result_code", "") == "SUCCESS";
+        return new DeductResult
+        {
+            // v2 只返回受理结果，真正的扣款成功以扣款结果通知为准
+            Paid = false,
+            Message = accepted ? "已受理，等待扣款结果通知" : $"扣款失败：{result.GetValueOrDefault("err_code_des", result.GetValueOrDefault("return_msg", ""))}",
+        };
+    }
+
+    /// <summary>查询协议状态：contract_state 0 已签约 / 1 未签约 / 9 签约进行中。</summary>
+    public override async Task<SubscriptionState> QuerySubscriptionAsync(SubscriptionContext ctx, CancellationToken ct)
+    {
+        var cfg = ctx.Config;
+        var apiV2Key = cfg.Require("apiV2Key");
+        var p = new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            ["appid"] = cfg.Require("appId"),
+            ["mch_id"] = cfg.Require("mchId"),
+            ["nonce_str"] = Guid.NewGuid().ToString("N"),
+            ["contract_id"] = ctx.UpstreamSubId,
+            ["version"] = "1.0",
+        };
+        p["sign"] = WechatV2.Sign(p, apiV2Key);
+        var result = await PostV2Async(p, "/papay/querycontract", apiV2Key, ct);
+        var state = result.GetValueOrDefault("contract_state", "");
+        var signed = state == "0";
+        return new SubscriptionState
+        {
+            Known = true,
+            Active = signed,
+            Revoked = !signed,
+            AutoRenew = signed,
+            Message = $"contract_state={state}",
+        };
+    }
+
+    /// <summary>解约：POST /papay/deletecontract（v2）。</summary>
+    public override async Task CancelAgreementAsync(SubscriptionContext ctx, CancellationToken ct)
+    {
+        var cfg = ctx.Config;
+        var apiV2Key = cfg.Require("apiV2Key");
+        var p = new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            ["appid"] = cfg.Require("appId"),
+            ["mch_id"] = cfg.Require("mchId"),
+            ["nonce_str"] = Guid.NewGuid().ToString("N"),
+            ["contract_id"] = ctx.UpstreamSubId,
+            ["contract_termination_remark"] = "商户发起解约",
+            ["version"] = "1.0",
+        };
+        p["sign"] = WechatV2.Sign(p, apiV2Key);
+        var result = await PostV2Async(p, "/papay/deletecontract", apiV2Key, ct);
+        if (result.GetValueOrDefault("result_code", "") != "SUCCESS")
+            throw Upstream(result.GetValueOrDefault("err_code", "WX_V2"), $"微信解约失败：{result.GetValueOrDefault("err_code_des", "")}");
+    }
+
+    private async Task<Dictionary<string, string>> PostV2Async(Dictionary<string, string> parameters, string path, string apiV2Key, CancellationToken ct)
+    {
+        using var req = new HttpRequestMessage(HttpMethod.Post, WechatV2.Host + path)
+        {
+            Content = new StringContent(WechatV2.ToXml(parameters), Encoding.UTF8, "text/xml"),
+        };
+        var (_, text) = await SendAsync(req, ct);
+        var result = WechatV2.ParseXml(text);
+        if (result.GetValueOrDefault("return_code", "") != "SUCCESS")
+            throw Upstream("WX_V2", $"微信 v2 接口失败：{result.GetValueOrDefault("return_msg", "")}");
+        if (!WechatV2.Verify(result, apiV2Key)) throw new ProviderException("WX_V2_SIGN", "微信 v2 应答验签失败");
+        return result;
+    }
+
+    /// <summary>把 v2 XML 回调（签约/解约/扣款结果）归一化为订阅事件。</summary>
+    private NotifyParseResult ParseV2Notify(PassageConfig cfg, string body)
+    {
+        var apiV2Key = cfg.Require("apiV2Key");
+        var p = WechatV2.ParseXml(body);
+        if (!WechatV2.Verify(p, apiV2Key)) return NotifyParseResult.Fail("v2 回调验签失败");
+        if (p.GetValueOrDefault("return_code", "") != "SUCCESS")
+            return NotifyParseResult.Ignore($"v2 回调失败：{p.GetValueOrDefault("return_msg", "")}");
+
+        var mchId = p.GetValueOrDefault("mch_id", "");
+        if (mchId.Length > 0 && mchId != cfg.Require("mchId")) return NotifyParseResult.Fail("商户号不匹配");
+
+        // 签约 / 解约通知
+        if (p.ContainsKey("change_type"))
+        {
+            var signed = p.GetValueOrDefault("change_type", "") == "ADD";
+            var contractCode = p.GetValueOrDefault("contract_code", "");
+            return NotifyParseResult.Of(new NotifyEvent
+            {
+                Type = NotifyEventType.Agreement,
+                OrderNo = signed ? contractCode : "",
+                Agreement = new AgreementInfo
+                {
+                    AgreementId = p.GetValueOrDefault("contract_id", contractCode),
+                    PayerId = p.GetValueOrDefault("openid", ""),
+                    SignedAt = long.TryParse(p.GetValueOrDefault("operate_time", ""), out var t) && t > 0 ? TimeUtil.FromUnixSeconds(t) : DateTime.UtcNow,
+                    Signed = signed,
+                    Message = signed ? "签约成功" : "解约：" + p.GetValueOrDefault("contract_termination_mode", ""),
+                },
+            });
+        }
+
+        // 扣款结果通知
+        var tradeState = p.GetValueOrDefault("trade_state", "");
+        if (tradeState.Length > 0)
+        {
+            if (tradeState != "SUCCESS") return NotifyParseResult.Ignore($"扣款状态 {tradeState}");
+            var paidAt = TimeUtil.ParseBeijing(p.GetValueOrDefault("time_end", ""), "yyyyMMddHHmmss");
+            return NotifyParseResult.Of(new NotifyEvent
+            {
+                Type = NotifyEventType.Subscription,
+                SubKind = SubscriptionEventKind.Charged,
+                OrderNo = "",
+                UpstreamTradeNo = p.GetValueOrDefault("transaction_id", ""),
+                Amount = long.TryParse(p.GetValueOrDefault("total_fee", ""), out var fee) ? fee : null,
+                PaidAt = paidAt,
+                BuyerId = p.GetValueOrDefault("openid", ""),
+                Subscription = new SubscriptionInfo
+                {
+                    UpstreamSubId = p.GetValueOrDefault("contract_id", ""),
+                    // 代扣单号：用于把扣款结果对回本地扣款单
+                    Token = p.GetValueOrDefault("out_trade_no", ""),
+                    PeriodStart = paidAt,
+                },
+            });
+        }
+
+        return NotifyParseResult.Ignore("未识别的 v2 回调");
+    }
+
     // ------------------------------------------------------------------ 账单
 
     /// <summary>申请交易账单（bill_type=ALL，明文）并下载解析。下载地址 5 分钟有效，下载请求同样需要签名。</summary>
@@ -309,6 +515,8 @@ public sealed class WechatProvider(IHttpClientFactory httpFactory) : PayProvider
                         UpstreamTradeNo = row.GetValueOrDefault("微信订单号", ""),
                         // 新版为"订单金额"，旧版商户账单为"总金额"
                         Amount = BillCsv.Fen(row.GetValueOrDefault("订单金额") ?? row.GetValueOrDefault("总金额", "0")),
+                        // 手续费：订单为正、退款为负（元）
+                        Fee = Money.FromYuan(row.GetValueOrDefault("手续费", "")),
                     });
                     break;
                 case "REFUND":
@@ -321,11 +529,65 @@ public sealed class WechatProvider(IHttpClientFactory httpFactory) : PayProvider
                         UpstreamTradeNo = row.GetValueOrDefault("微信退款单号", ""),
                         RefundNo = row.GetValueOrDefault("商户退款单号", ""),
                         Amount = BillCsv.Fen(row.GetValueOrDefault("退款金额", "0")),
+                        Fee = Money.FromYuan(row.GetValueOrDefault("手续费", "")),
                     });
                     break;
             }
         }
         return items;
+    }
+
+    /// <summary>资金账单：GET /v3/bill/fundflowbill（账户收支，手续费为独立行）。</summary>
+    public override async Task<FundBillSummary> DownloadFundBillAsync(BillContext ctx, CancellationToken ct)
+    {
+        var cfg = ctx.Config;
+        var (status, text) = await CallAsync(cfg, HttpMethod.Get, $"/v3/bill/fundflowbill?bill_date={ctx.BillDate:yyyy-MM-dd}&account_type=BASIC&tar_type=GZIP", "", ct);
+        var json = ParseJson(text, Meta.Name);
+        if (status is < 200 or >= 300)
+        {
+            if (json.Str("code") == "NO_STATEMENT_EXIST") return new FundBillSummary();
+            throw Upstream(json.Str("code"), $"申请微信资金账单失败：{json.Str("message")}");
+        }
+
+        var url = new Uri(json.Str("download_url"));
+        var auth = BuildAuthorization(cfg.Require("mchId"), cfg.Require("serialNo"), cfg.Require("privateKey"),
+            "GET", url.PathAndQuery, "", DateTimeOffset.UtcNow.ToUnixTimeSeconds().ToString(), Guid.NewGuid().ToString("N"));
+        using var req = new HttpRequestMessage(HttpMethod.Get, url);
+        req.Headers.TryAddWithoutValidation("Authorization", "WECHATPAY2-SHA256-RSA2048 " + auth);
+        req.Headers.TryAddWithoutValidation("Accept", "application/json");
+        req.Headers.TryAddWithoutValidation("User-Agent", "PayOps/1.0");
+        try
+        {
+            using var resp = await Http.SendAsync(req, ct);
+            var bytes = await resp.Content.ReadAsByteArrayAsync(ct);
+            if (!resp.IsSuccessStatusCode)
+                throw Upstream("BILL_DOWNLOAD", $"下载微信资金账单失败：HTTP {(int)resp.StatusCode}");
+            return ParseFundBill(BillCsv.Decode(BillCsv.Gunzip(bytes)));
+        }
+        catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException or IOException)
+        {
+            if (ct.IsCancellationRequested) throw;
+            throw new ProviderException("UPSTREAM_UNREACHABLE", $"下载微信资金账单网络异常：{ex.Message}", inner: ex);
+        }
+    }
+
+    /// <summary>解析资金账单：按"收支类型"汇总，业务类型含"手续费"的行单独汇总（扣除为支出、退还为收入）。</summary>
+    public static FundBillSummary ParseFundBill(string csv)
+    {
+        long income = 0, expense = 0, refund = 0, fee = 0;
+        var rows = 0;
+        foreach (var row in BillCsv.Rows(csv, ["收支类型", "收支金额(元)"], stopFirstField: "资金流水总笔数"))
+        {
+            rows++;
+            var amount = BillCsv.Fen(row.GetValueOrDefault("收支金额(元)") ?? row.GetValueOrDefault("收支金额（元）", "0"));
+            var direction = row["收支类型"];
+            var bizType = row.GetValueOrDefault("业务类型", "");
+            if (direction == "收入") income += amount;
+            else expense += amount;
+            if (bizType.Contains("手续费", StringComparison.Ordinal)) fee += direction == "支出" ? amount : -amount;
+            else if (bizType.Contains("退款", StringComparison.Ordinal)) refund += amount;
+        }
+        return new FundBillSummary { Income = income, Expense = expense, Refund = refund, Fee = fee, Message = $"共 {rows} 行" };
     }
 
     public override NotifyReply BuildReply(NotifyOutcome outcome, string message) =>

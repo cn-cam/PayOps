@@ -16,7 +16,7 @@ const USERNAME = process.env.ADMIN_USER ?? 'admin'
 const PASSWORD = process.env.ADMIN_PASSWORD ?? 'Admin@123456'
 const OUT = resolve(dirname(fileURLToPath(import.meta.url)), '../docs/assets/screenshots')
 const PORT = 9333
-const WIDTH = 1440
+const WIDTH = 1600
 const SCALE = 1.5
 
 const browser = [

@@ -8,11 +8,13 @@ import type {
   ReconBizType,
   ReconDiffStatus,
   ReconDiffType,
+  ReconKind,
   ReconStatus,
   RefundSource,
   RefundStatus,
   Role,
   SubscriptionMockEvent,
+  SubscriptionMode,
   SubscriptionStatus,
 } from '@/api/types'
 
@@ -58,12 +60,20 @@ export const ORDER_TYPE: EnumOption<OrderType>[] = [
   { value: 0, label: '一次性', type: 'info' },
   { value: 1, label: '订阅首购', type: 'primary' },
   { value: 2, label: '订阅续费', type: 'success' },
+  { value: 3, label: '签约代扣', type: 'warning' },
 ]
 
 export const SUBSCRIPTION_STATUS: EnumOption<SubscriptionStatus>[] = [
   { value: 1, label: '生效中', type: 'success' },
   { value: 2, label: '已过期', type: 'info' },
   { value: 3, label: '已撤销', type: 'danger' },
+  { value: 4, label: '已暂停', type: 'warning' },
+]
+
+/** 0 应用商店订阅（由商店扣款） / 1 签约代扣（由本系统按周期发起扣款） */
+export const SUBSCRIPTION_MODE: EnumOption<SubscriptionMode>[] = [
+  { value: 0, label: '应用商店订阅', type: 'info' },
+  { value: 1, label: '签约代扣', type: 'primary' },
 ]
 
 /** autoRenew：false 表示已退订，当前周期结束后失效 */
@@ -78,6 +88,10 @@ export const SUBSCRIPTION_MOCK_EVENTS: { value: SubscriptionMockEvent; label: st
   { value: 'resume', label: '恢复续订', hint: '重新打开自动续订' },
   { value: 'expire', label: '到期', hint: '订阅变为已过期' },
   { value: 'revoke', label: '撤销', hint: '退款 / 撤回，订阅立即失效' },
+  { value: 'upgrade', label: '升级', hint: '立即切换到更高档商品（本期生效）' },
+  { value: 'downgrade', label: '降级', hint: '下一期切换到更低档商品' },
+  { value: 'pause', label: '暂停', hint: '暂停订阅，暂停期间不扣款' },
+  { value: 'wake', label: '恢复', hint: '从暂停恢复为生效中' },
 ]
 
 export const RECON_STATUS: EnumOption<ReconStatus>[] = [
@@ -87,9 +101,17 @@ export const RECON_STATUS: EnumOption<ReconStatus>[] = [
   { value: 3, label: '失败', type: 'danger' },
 ]
 
+/** 1 交易账单（支付 / 退款） / 2 资金账单（账户收支、手续费） */
+export const RECON_KIND: EnumOption<ReconKind>[] = [
+  { value: 1, label: '交易账单', type: 'primary' },
+  { value: 2, label: '资金账单', type: 'warning' },
+]
+
 export const RECON_BIZ_TYPE: EnumOption<ReconBizType>[] = [
   { value: 1, label: '支付', type: 'primary' },
   { value: 2, label: '退款', type: 'warning' },
+  { value: 3, label: '手续费', type: 'warning' },
+  { value: 4, label: '资金', type: 'info' },
 ]
 
 export const RECON_DIFF_TYPE: EnumOption<ReconDiffType>[] = [
@@ -111,6 +133,18 @@ export const RECON_DIFF_HINT: Record<ReconDiffType, { short: string; detail: str
   3: {
     short: '两边都有但金额对不上',
     detail: '本地与上游都有这笔，但金额不同。请核对订单金额、优惠 / 部分退款等情况，以上游实际入账为准进行处理。',
+  },
+}
+
+/** 手续费 / 资金类差异的大白话解释（bizType 3 / 4） */
+export const RECON_BIZ_HINT: Partial<Record<ReconBizType, { short: string; detail: string }>> = {
+  3: {
+    short: '上游手续费与按费率计算不一致',
+    detail: '手续费 = 上游手续费与按通道费率计算不一致，通常是费率变更或调价。确认新费率后修改通道的「手续费率」。',
+  },
+  4: {
+    short: '资金账单收支与本地记录不一致',
+    detail: '资金 = 资金账单收支与本地记录不一致，需核对提现 / 充值 / 其他业务。',
   },
 }
 

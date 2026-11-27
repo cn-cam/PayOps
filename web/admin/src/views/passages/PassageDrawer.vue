@@ -41,12 +41,14 @@ const form = reactive({
   name: '',
   provider: '',
   status: 1 as EnableStatus,
+  feeRateBp: 0,
   remark: '',
   config: {} as Record<string, string>,
 })
 
 const providerMeta = computed(() => meta.getProvider(form.provider))
 const fields = computed<ConfigField[]>(() => providerMeta.value?.configFields ?? [])
+const feeRatePercent = computed(() => (form.feeRateBp > 0 ? `${(form.feeRateBp / 100).toFixed(2)}%` : '不核对'))
 
 const capabilityTags = computed(() => {
   const c = providerMeta.value?.capabilities
@@ -58,9 +60,17 @@ const capabilityTags = computed(() => {
     { label: '票据校验', on: c.receiptVerify },
     { label: '服务端回调', on: c.serverNotify },
     { label: '自动续费订阅', on: c.subscription },
-    // 不支持订阅的类型谈不上退订，不展示这一项
-    ...(c.subscription ? [{ label: '服务端退订', on: c.subscriptionCancel }] : []),
-    { label: '对账单', on: c.bill },
+    // 不支持订阅的类型谈不上退订 / 暂停 / 升降级，不展示这几项
+    ...(c.subscription
+      ? [
+          { label: '服务端退订', on: c.subscriptionCancel },
+          { label: '暂停 / 恢复', on: c.subscriptionPause },
+          { label: '升级 / 降级', on: c.subscriptionChange },
+        ]
+      : []),
+    { label: '签约代扣', on: c.deduct },
+    { label: '交易账单', on: c.bill },
+    { label: '资金账单', on: c.fundBill },
   ]
 })
 
@@ -131,7 +141,7 @@ function onProviderChange() {
 function resetForm() {
   detail.value = null
   maskedKeys.value = new Set()
-  Object.assign(form, { name: '', provider: '', status: 1, remark: '', config: {} })
+  Object.assign(form, { name: '', provider: '', status: 1, feeRateBp: 0, remark: '', config: {} })
 }
 
 /** 关闭后立即清空，避免下次打开时先按上一次的支付类型渲染一遍动态表单 */
@@ -151,6 +161,7 @@ async function onOpen() {
       form.name = d.name
       form.provider = d.provider
       form.status = d.status
+      form.feeRateBp = d.feeRateBp ?? 0
       form.remark = d.remark ?? ''
       const source = d.config ?? {}
       const config: Record<string, string> = { ...source }
@@ -193,6 +204,7 @@ async function submit(test: boolean) {
     const base = {
       name: form.name.trim(),
       status: form.status,
+      feeRateBp: form.feeRateBp ?? 0,
       remark: form.remark.trim(),
       config: buildConfig(),
     }
@@ -290,6 +302,19 @@ async function submit(test: boolean) {
           <el-radio v-for="s in ENABLE_STATUS" :key="s.value" :value="s.value">{{ s.label }}</el-radio>
         </el-radio-group>
         <div class="form-help">停用后，所有绑定了该通道的渠道都不会再路由到它。</div>
+      </el-form-item>
+      <el-form-item label="手续费率" prop="feeRateBp">
+        <el-input-number
+          v-model="form.feeRateBp"
+          :min="0"
+          :max="10000"
+          :step="1"
+          :precision="0"
+          controls-position="right"
+          style="width: 160px"
+        />
+        <span class="fee-rate-value">= {{ feeRatePercent }}</span>
+        <div class="form-help">用于手续费核对；0 表示不核对。按万分比填写，60 表示 0.60%。</div>
       </el-form-item>
       <el-form-item label="备注" prop="remark">
         <el-input v-model="form.remark" type="textarea" :rows="2" maxlength="255" show-word-limit />
@@ -439,6 +464,12 @@ async function submit(test: boolean) {
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
+}
+.fee-rate-value {
+  margin-left: 10px;
+  color: var(--el-text-color-secondary);
+  font-size: 12.5px;
+  font-variant-numeric: tabular-nums;
 }
 .mono-input :deep(.el-textarea__inner) {
   font-family: var(--mono-font);

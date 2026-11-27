@@ -93,6 +93,7 @@ public sealed class UpstreamNotifyService(
                         ? (NotifyOutcome.Success, "退款事件已处理")
                         : (NotifyOutcome.OrderNotFound, "退款事件找不到对应单据"),
                     NotifyEventType.Subscription => await subscriptions.HandleEventAsync(e, provider.Meta.Code, req.PassageId),
+                    NotifyEventType.Agreement => await subscriptions.HandleAgreementAsync(e, provider.Meta.Code, req.PassageId),
                     _ => (NotifyOutcome.Success, e.Message.Length > 0 ? e.Message : "忽略"),
                 };
             }

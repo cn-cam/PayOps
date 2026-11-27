@@ -100,7 +100,7 @@ public sealed class AdminQueryService(Db db, IPayProviderRegistry providers, IOp
     // ------------------------------------------------------------------ 订阅
 
     private const string SubscriptionSelect =
-        "s.id, s.sub_no, s.app_id, s.app_code, s.channel_code, s.passage_id, p.name AS passage_name, s.provider, s.product_id, s.user_id, s.upstream_sub_id, s.status, s.auto_renew, s.amount, s.period_start, s.expires_at, s.cancel_at, s.renew_count, s.first_order_no, s.last_order_no, s.created_at, s.updated_at";
+        "s.id, s.sub_no, s.app_id, s.app_code, s.channel_code, s.passage_id, p.name AS passage_name, s.provider, s.mode, s.product_id, s.next_product_id, s.user_id, s.upstream_sub_id, s.status, s.auto_renew, s.amount, s.period_start, s.expires_at, s.cancel_at, s.paused_at, s.next_charge_at, s.charge_fail_count, s.renew_count, s.first_order_no, s.last_order_no, s.created_at, s.updated_at";
 
     private const string SubscriptionFrom = "pay_subscription s LEFT JOIN pay_passage p ON p.id = s.passage_id";
 
@@ -111,6 +111,7 @@ public sealed class AdminQueryService(Db db, IPayProviderRegistry providers, IOp
             .Add("s.app_id = {0}", q.AppId)
             .Add("s.provider = {0}", q.Provider)
             .Add("s.status = {0}", q.Status)
+            .Add("s.mode = {0}", q.Mode)
             .Add("s.auto_renew = {0}", q.AutoRenew)
             .Add("s.user_id = {0}", q.UserId)
             .Add("s.product_id = {0}", q.ProductId)
@@ -138,6 +139,7 @@ public sealed class AdminQueryService(Db db, IPayProviderRegistry providers, IOp
             .Add("b.passage_id = {0}", q.PassageId)
             .Add("b.provider = {0}", q.Provider)
             .Add("b.status = {0}", q.Status)
+            .Add("b.kind = {0}", q.Kind)
             .Add("b.bill_date >= {0}", q.StartDate)
             .Add("b.bill_date <= {0}", q.EndDate);
         var page = await db.PageAsync<ReconBatchItem>(

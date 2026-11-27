@@ -130,10 +130,16 @@ async function renotify() {
 }
 
 async function mockPay() {
-  if (!(await confirmAction('将模拟上游支付成功回调，订单会变为支付成功并通知业务方，确定吗？', '模拟支付', 'info'))) return
+  const tip =
+    order.value?.orderType === 3
+      ? '将模拟签约成功回调，订单会变为支付成功并创建代扣订阅，确定吗？'
+      : order.value?.orderType === 1
+        ? '将模拟支付成功回调，订单会变为支付成功并创建订阅，确定吗？'
+        : '将模拟上游支付成功回调，订单会变为支付成功并通知业务方，确定吗？'
+  if (!(await confirmAction(tip, '模拟支付', 'info'))) return
   await run('mockPay', async () => {
     await ordersApi.mockPay(props.orderNo)
-    ElMessage.success('已模拟支付成功')
+    ElMessage.success(order.value?.orderType === 3 ? '已模拟签约成功' : '已模拟支付成功')
     await afterChange()
   })
 }
@@ -329,6 +335,7 @@ function viewUpstream(row: UpstreamNotifyItem) {
           <el-descriptions-item label="订单类型">
             <EnumTag :options="ORDER_TYPE" :value="order.orderType ?? 0" size="small" effect="plain" />
             <span v-if="order.orderType === 2" class="text-secondary text-small currency">由上游扣款事件生成</span>
+            <span v-else-if="order.orderType === 3" class="text-secondary text-small currency">签约成功后建立代扣订阅</span>
           </el-descriptions-item>
           <el-descriptions-item label="订阅号">
             <el-link

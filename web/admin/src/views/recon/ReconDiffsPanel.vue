@@ -22,6 +22,7 @@ import EnumTag from '@/components/EnumTag.vue'
 import TablePager from '@/components/TablePager.vue'
 import { validateForm } from '@/utils/common'
 import {
+  RECON_BIZ_HINT,
   RECON_BIZ_TYPE,
   RECON_DIFF_HINT,
   RECON_DIFF_STATUS,
@@ -144,6 +145,11 @@ function amountText(value: number | null | undefined): string {
   return value === null || value === undefined ? '-' : formatMoney(value)
 }
 
+/** 手续费 / 资金类差异用 bizType 的解释，其余用 diffType 的解释 */
+function hintFor(row: ReconDiffItem): { short: string; detail: string } | undefined {
+  return RECON_BIZ_HINT[row.bizType] ?? RECON_DIFF_HINT[row.diffType]
+}
+
 const drawers = ref<InstanceType<typeof DetailDrawers>>()
 
 function openOrder(orderNo: string | null) {
@@ -161,7 +167,7 @@ const rules: FormRules = {
   remark: [{ required: true, whitespace: true, message: '请填写处理说明', trigger: 'blur' }],
 }
 
-const targetHint = computed(() => (target.value ? RECON_DIFF_HINT[target.value.diffType] : undefined))
+const targetHint = computed(() => (target.value ? hintFor(target.value) : undefined))
 
 function openHandle(row: ReconDiffItem) {
   target.value = row
@@ -235,6 +241,12 @@ async function submit() {
         <el-tag :type="t.type" effect="light" size="small">{{ t.label }}</el-tag>
         <span>{{ RECON_DIFF_HINT[t.value].detail }}</span>
       </div>
+      <template v-for="t in RECON_BIZ_TYPE" :key="`biz-${t.value}`">
+        <div v-if="RECON_BIZ_HINT[t.value]" class="hints__item">
+          <el-tag :type="t.type" effect="light" size="small">{{ t.label }}</el-tag>
+          <span>{{ RECON_BIZ_HINT[t.value]?.detail }}</span>
+        </div>
+      </template>
     </div>
 
     <div class="toolbar">
@@ -271,16 +283,16 @@ async function submit() {
               <EnumTag :options="RECON_BIZ_TYPE" :value="row.bizType" size="small" effect="plain" />
               <EnumTag :options="RECON_DIFF_TYPE" :value="row.diffType" size="small" />
               <el-tooltip
-                v-if="RECON_DIFF_HINT[row.diffType as ReconDiffType]"
+                v-if="hintFor(row as ReconDiffItem)"
                 placement="top"
                 popper-class="recon-hint-tip"
-                :content="RECON_DIFF_HINT[row.diffType as ReconDiffType].detail"
+                :content="hintFor(row as ReconDiffItem)?.detail"
               >
                 <el-icon class="diff-help"><QuestionFilled /></el-icon>
               </el-tooltip>
             </span>
             <span class="text-secondary text-small diff-short">
-              {{ RECON_DIFF_HINT[row.diffType as ReconDiffType]?.short }}
+              {{ hintFor(row as ReconDiffItem)?.short }}
             </span>
           </div>
         </template>

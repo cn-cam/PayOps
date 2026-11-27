@@ -11,7 +11,7 @@
     5. 模拟上游回调 → 订单成功 → 业务通知送达（演示接收端）；
     6. 部分退款；
     7. 自动续费订阅：首购、续订、退订、恢复、到期；
-    8. 对账：平账与差异处理。
+    8. 对账：平账与差异处理；9. 签约代扣：签约、扣款、解约；10. 手续费与资金账单核对。
   需要服务以 Development 环境运行（开启了演示接收端）。
 
 .EXAMPLE
@@ -212,9 +212,9 @@ Assert ($subDetail.notifyTasks.Count -eq 3) "退订 / 恢复 / 到期各产生�
 
 Step "8. 对账：平账与差异"
 $yesterday = (Get-Date).AddDays(-1).ToString("yyyy-MM-dd")
-function Wait-Recon($passageId) {
+function Wait-Recon($passageId, $kind = 1) {
     for ($i = 0; $i -lt 40; $i++) {
-        $b = (Admin GET "/recon/batches?passageId=$passageId&startDate=$yesterday&endDate=$yesterday").items | Select-Object -First 1
+        $b = (Admin GET "/recon/batches?passageId=$passageId&kind=$kind&startDate=$yesterday&endDate=$yesterday").items | Select-Object -First 1
         if ($b -and $b.status -ne 0) { return $b }
         Start-Sleep -Milliseconds 500
     }
@@ -235,12 +235,60 @@ $diffs = (Admin GET "/recon/diffs?batchId=$($withDiff.id)").items
 $diffs | ForEach-Object { Write-Host ("    差异 type={0} 订单={1} 本地={2} 上游={3} {4}" -f $_.diffType, $_.orderNo, $_.localAmount, $_.upstreamAmount, $_.localStatus) }
 Assert (($diffs | Where-Object { $_.diffType -eq 1 }).Count -ge 1) "识别出上游有本地无的记录"
 Admin POST "/recon/diffs/$($diffs[0].id)/handle" @{ remark = "演示：已核实" } | Out-Null
-$after = (Admin GET "/recon/batches?passageId=$pDiffId&startDate=$yesterday&endDate=$yesterday").items[0]
+$after = (Admin GET "/recon/batches?passageId=$pDiffId&kind=1&startDate=$yesterday&endDate=$yesterday").items[0]
 Assert ($after.openDiffCount -eq $withDiff.diffCount - 1) "差异标记为已处理后，未处理数减少"
 $today = Invoke-RestMethod -Method Post -Uri "$BaseUrl/api/admin/recon/batches" -Headers @{ Authorization = "Bearer $script:Token" } -ContentType "application/json" -Body (@{ passageId = $pA; billDate = (Get-Date).ToString("yyyy-MM-dd") } | ConvertTo-Json)
 Assert ($today.code -ne 0) "今天的账不能对（$($today.message)）"
 
-Step "9. 集群与统计"
+Step "9. 签约代扣：签约 → 扣款 → 解约"
+$signOrder = Gateway POST "/api/pay/orders" @{
+    channel = "official"; payMethod = "mock"; mchOrderNo = "AG" + [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+    amount = 500; subject = "会员自动续费"; productId = "vip_auto"; userId = "u3001"; signAgreement = $true; extra = @{ periodDays = "1" }
+}
+Assert ($signOrder.code -eq 0 -and $signOrder.data.orderType -eq 3) "签约单创建成功（orderType=3，返回拉起签约的凭据）"
+$signNotifyUrl = $BaseUrl + ([Uri]$signOrder.data.credential.data.notifyUrl).AbsolutePath
+$signCb = Invoke-WebRequest -Method Post -Uri $signNotifyUrl -Body $signOrder.data.credential.data.body -ContentType "application/json" -SkipHttpErrorCheck
+$deductSub = (Gateway GET "/api/pay/subscriptions?orderNo=$($signOrder.data.orderNo)").data
+Assert ($signCb.Content -eq "success" -and $deductSub.status -eq 1 -and $deductSub.mode -eq 1) "签约成功并建立代扣订阅 $($deductSub.subNo)（mode=1，每 1 天扣款）"
+
+$charged = Admin POST "/subscriptions/$($deductSub.subNo)/charge" $null
+Assert ($charged.changed -and $charged.status -eq 1) "手动代扣成功：$($charged.message)"
+$deductSub = (Admin GET "/subscriptions/$($deductSub.subNo)")
+$deductOrders = $deductSub.orders | Where-Object { $_.orderType -eq 2 }
+Assert ($deductSub.renewCount -eq 1 -and $deductOrders.Count -eq 1 -and $deductOrders[0].status -eq 1) "代扣生成 1 笔续费单并入账，周期顺延到 $($deductSub.expiresAt)"
+$cancelAgreement = Gateway POST "/api/pay/subscriptions/cancel" @{ subNo = $deductSub.subNo }
+Assert ($cancelAgreement.code -eq 0 -and -not $cancelAgreement.data.autoRenew) "解约成功：不再自动扣款"
+
+Step "10. 手续费与资金账单核对"
+$pFee = (Admin GET "/passages/all?provider=mock") | Where-Object { $_.name -eq "模拟-手续费差异" }
+if (-not $pFee) {
+    $pFeeId = (Admin POST "/passages" @{ name = "模拟-手续费差异"; provider = "mock"; status = 1; feeRateBp = 50; remark = "demo"; config = @{ secret = "demo-secret"; billFeeBp = "60" } }).id
+    $chFee = (Admin GET "/channels/all?appId=$appId") | Where-Object { $_.code -eq "fee" }
+    $chFeeId = if ($chFee) { $chFee.id } else { (Admin POST "/channels" @{ appId = $appId; code = "fee"; name = "手续费演示"; remark = ""; status = 1 }).id }
+    Admin POST "/channels/$chFeeId/bindings" @{ passageId = $pFeeId; methods = @(); weight = 100; priority = 0; minAmount = 0; maxAmount = 0; dailyLimitAmount = 0; dailyLimitCount = 0; startTime = ""; endTime = ""; status = 1; remark = "demo" } | Out-Null
+} else {
+    $pFeeId = $pFee.id
+    # 老演示数据可能没有手续费率：补齐（密钥字段传掩码即保持不变）
+    $detail = Admin GET "/passages/$pFeeId"
+    if ($detail.feeRateBp -ne 50) {
+        Admin PUT "/passages/$pFeeId" @{ name = $detail.name; status = $detail.status; feeRateBp = 50; remark = $detail.remark; config = $detail.config } | Out-Null
+    }
+}
+$feeOrder = Admin POST '/orders/test' @{ appId = $appId; channelCode = "fee"; payMethod = "mock"; amount = 10000; subject = "手续费演示订单" }
+Admin POST "/orders/$($feeOrder.orderNo)/mock-pay" | Out-Null
+$feeSql = "UPDATE payops.pay_order SET paid_at = paid_at - INTERVAL 1 DAY, created_at = created_at - INTERVAL 1 DAY WHERE order_no = '$($feeOrder.orderNo)';"
+$feeSql | docker exec -i mysql.dev mysql -uroot -p123456 2>$null
+Admin POST "/recon/batches" @{ passageId = $pFeeId; billDate = $yesterday; kind = 1 } | Out-Null
+$feeBatch = Wait-Recon $pFeeId 1
+Assert ($feeBatch.kind -eq 1 -and $feeBatch.upstreamFeeAmount -gt 0) "交易账单手续费：上游 $($feeBatch.upstreamFeeAmount) 分，按通道费率应收 $($feeBatch.expectedFeeAmount) 分"
+$feeDiffs = (Admin GET "/recon/diffs?batchId=$($feeBatch.id)&bizType=3").items
+Assert ($feeDiffs.Count -ge 1) "费率不一致被识别为手续费差异（$($feeDiffs[0].localStatus)）"
+
+Admin POST "/recon/batches" @{ passageId = $pFeeId; billDate = $yesterday; kind = 2 } | Out-Null
+$fundBatch = Wait-Recon $pFeeId 2
+Assert ($fundBatch.kind -eq 2 -and $fundBatch.fundIncome -gt 0) "资金账单核对：收入 $($fundBatch.fundIncome) 分，支出 $($fundBatch.fundExpense) 分，手续费 $($fundBatch.fundFee) 分"
+
+Step "11. 集群与统计"
 $info = Admin GET "/system/info"
 $info.checks | ForEach-Object { Write-Host ("    {0,-9} ok={1} {2}" -f $_.name, $_.ok, $_.message) }
 $info.nodes | ForEach-Object { Write-Host ("    节点 {0}  角色={1}  节点号={2}" -f $_.instanceId, ($_.roles -join ","), $_.workerId) }

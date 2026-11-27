@@ -26,7 +26,7 @@ public sealed class HuaweiProvider(IHttpClientFactory httpFactory) : PayProvider
         Name = "华为应用内支付",
         Category = "store",
         Methods = [new("huawei_iap", "华为IAP")],
-        Capabilities = new() { ReceiptVerify = true, Subscription = true, SubscriptionCancel = true },
+        Capabilities = new() { ReceiptVerify = true, Subscription = true, SubscriptionCancel = true, SubscriptionChange = true, SubscriptionPause = true },
         ConfigFields =
         [
             new() { Key = "appId", Label = "应用AppID", Required = true, Help = "AppGallery Connect 中的 APP ID（OAuth client_id）" },
@@ -81,7 +81,9 @@ public sealed class HuaweiProvider(IHttpClientFactory httpFactory) : PayProvider
             Known = true,
             Active = q.State == UpstreamState.Paid,
             Revoked = q.State == UpstreamState.Refunded,
+            Paused = q.State == UpstreamState.Closed && q.Subscription is not null,
             AutoRenew = q.Subscription?.AutoRenew ?? false,
+            ProductId = q.Subscription?.ProductId,
             PeriodStart = q.Subscription?.PeriodStart,
             ExpiresAt = q.Subscription?.ExpiresAt,
             LatestTradeNo = q.UpstreamTradeNo,
@@ -184,6 +186,9 @@ public sealed class HuaweiProvider(IHttpClientFactory httpFactory) : PayProvider
             1 => SubscriptionEventKind.Revoked,
             5 => SubscriptionEventKind.AutoRenewOff,
             6 => SubscriptionEventKind.AutoRenewOn,
+            // 4 降级/换购，下一期生效；9 账号冻结、10 暂停计划生效 → 按暂停处理
+            4 => SubscriptionEventKind.Downgraded,
+            9 or 10 => SubscriptionEventKind.Paused,
             _ => (SubscriptionEventKind)0,
         };
         if (kind == 0) return NotifyParseResult.Ignore($"忽略订阅通知类型 {type}");
@@ -202,6 +207,23 @@ public sealed class HuaweiProvider(IHttpClientFactory httpFactory) : PayProvider
                 Type = NotifyEventType.Subscription, SubKind = kind,
                 OrderNo = q.BoundOrderNo ?? "", UpstreamTradeNo = q.UpstreamTradeNo,
                 PaidAt = q.PaidAt, ProductId = q.ProductId, Subscription = info,
+            });
+            return result;
+        }
+
+        if (kind == SubscriptionEventKind.Downgraded)
+        {
+            // 4：下一期改为 status.productId（换购时也可能是立即生效，以查询结果为准）
+            result.Events.Add(new NotifyEvent
+            {
+                Type = NotifyEventType.Subscription, SubKind = kind, UpstreamTradeNo = q.UpstreamTradeNo,
+                Subscription = new SubscriptionInfo
+                {
+                    UpstreamSubId = subscriptionId, Token = purchaseToken,
+                    ProductId = q.ProductId ?? info.ProductId,
+                    NextProductId = status.Str("productId"),
+                    ExpiresAt = info.ExpiresAt, AutoRenew = info.AutoRenew, Amount = info.Amount,
+                },
             });
             return result;
         }

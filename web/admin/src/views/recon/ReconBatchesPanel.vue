@@ -10,6 +10,7 @@ import type {
   ReconBatchItem,
   ReconBatchListQuery,
   ReconDiffStatus,
+  ReconKind,
   ReconStatus,
 } from '@/api/types'
 import { usePagedTable } from '@/composables/usePagedTable'
@@ -20,7 +21,7 @@ import EnumTag from '@/components/EnumTag.vue'
 import ProviderSelect from '@/components/ProviderSelect.vue'
 import TablePager from '@/components/TablePager.vue'
 import { confirmAction, formatCount, validateForm } from '@/utils/common'
-import { RECON_STATUS } from '@/utils/enums'
+import { RECON_KIND, RECON_STATUS, enumLabel } from '@/utils/enums'
 import { formatMoney } from '@/utils/money'
 import { formatTime } from '@/utils/time'
 
@@ -36,17 +37,19 @@ interface Query {
   passageId: number | undefined
   provider: string | undefined
   status: ReconStatus | undefined
+  kind: ReconKind | undefined
   dateRange: BillDateRange
 }
 
 const { query, items, total, page, pageSize, loading, load, search, reset, onPageChange, onSizeChange } =
   usePagedTable<ReconBatchItem, Query, ReconBatchListQuery>(
     reconApi.batches,
-    () => ({ passageId: undefined, provider: undefined, status: undefined, dateRange: null }),
+    () => ({ passageId: undefined, provider: undefined, status: undefined, kind: undefined, dateRange: null }),
     (q) => ({
       passageId: q.passageId,
       provider: q.provider,
       status: q.status,
+      kind: q.kind,
       startDate: q.dateRange?.[0],
       endDate: q.dateRange?.[1],
     }),
@@ -59,9 +62,12 @@ const passageOptions = computed(() =>
   query.provider ? allPassages.value.filter((p) => p.provider === query.provider) : allPassages.value,
 )
 
-/** 只有支付类型支持下载对账单（capabilities.bill）的通道才能对账 */
-const billPassages = computed(() =>
-  allPassages.value.filter((p) => meta.getProvider(p.provider)?.capabilities?.bill === true),
+/** 只有支付类型支持交易账单（capabilities.bill）或资金账单（capabilities.fundBill）的通道才能对账 */
+const reconPassages = computed(() =>
+  allPassages.value.filter((p) => {
+    const c = meta.getProvider(p.provider)?.capabilities
+    return c?.bill === true || c?.fundBill === true
+  }),
 )
 
 onMounted(async () => {
@@ -121,10 +127,15 @@ defineExpose({ reload: manualRefresh })
 const dialogVisible = ref(false)
 const saving = ref(false)
 const formRef = ref<FormInstance>()
-const form = reactive({ passageId: undefined as number | undefined, billDate: '' })
+const form = reactive({
+  passageId: undefined as number | undefined,
+  billDate: '',
+  kind: undefined as ReconKind | undefined,
+})
 
 const rules: FormRules = {
   passageId: [{ required: true, message: '请选择通道', trigger: 'change' }],
+  kind: [{ required: true, message: '请选择账单类型', trigger: 'change' }],
   billDate: [{ required: true, message: '请选择账单日', trigger: 'change' }],
 }
 
@@ -133,10 +144,33 @@ function disabledDate(date: Date): boolean {
   return !dayjs(date).isBefore(dayjs().startOf('day'))
 }
 
+/** 所选通道的支付类型支持的账单类型 */
+const kindOptions = computed<ReconKind[]>(() => {
+  const passage = allPassages.value.find((p) => p.id === form.passageId)
+  const c = meta.getProvider(passage?.provider)?.capabilities
+  const list: ReconKind[] = []
+  if (c?.bill) list.push(1)
+  if (c?.fundBill) list.push(2)
+  return list
+})
+
+const selectedPassage = computed(() => allPassages.value.find((p) => p.id === form.passageId))
+
+function onFormPassageChange() {
+  if (form.passageId === undefined) {
+    form.kind = undefined
+    return
+  }
+  if (!form.kind || !kindOptions.value.includes(form.kind)) form.kind = kindOptions.value[0]
+}
+
 function openCreate() {
-  form.passageId = query.passageId !== undefined && billPassages.value.some((p) => p.id === query.passageId)
+  const preferred = query.passageId !== undefined && reconPassages.value.some((p) => p.id === query.passageId)
     ? query.passageId
     : undefined
+  form.passageId = preferred
+  form.kind = preferred !== undefined && query.kind ? query.kind : undefined
+  onFormPassageChange()
   form.billDate = dayjs().subtract(1, 'day').format('YYYY-MM-DD')
   dialogVisible.value = true
 }
@@ -145,7 +179,11 @@ async function submit() {
   if (!(await validateForm(formRef.value))) return
   saving.value = true
   try {
-    await reconApi.createBatch({ passageId: form.passageId as number, billDate: form.billDate })
+    await reconApi.createBatch({
+      passageId: form.passageId as number,
+      billDate: form.billDate,
+      kind: form.kind as ReconKind,
+    })
     dialogVisible.value = false
     ElMessage.success('已发起对账，批次在后台执行，列表会自动刷新')
     page.value = 1
@@ -192,6 +230,15 @@ function refundMismatch(row: ReconBatchItem): boolean {
     (row.upstreamRefundCount !== row.localRefundCount || row.upstreamRefundAmount !== row.localRefundAmount)
   )
 }
+
+/** 只有配置了费率（expectedFeeAmount > 0）才做手续费核对 */
+function feeChecked(row: ReconBatchItem): boolean {
+  return row.kind === 1 && row.expectedFeeAmount > 0
+}
+
+function feeMismatch(row: ReconBatchItem): boolean {
+  return compared(row) && feeChecked(row) && row.upstreamFeeAmount !== row.expectedFeeAmount
+}
 </script>
 
 <template>
@@ -217,6 +264,11 @@ function refundMismatch(row: ReconBatchItem): boolean {
           <el-option v-for="s in RECON_STATUS" :key="s.value" :value="s.value" :label="s.label" />
         </el-select>
       </el-form-item>
+      <el-form-item label="账单类型">
+        <el-select v-model="query.kind" placeholder="全部" clearable style="width: 130px" @change="search">
+          <el-option v-for="k in RECON_KIND" :key="k.value" :value="k.value" :label="k.label" />
+        </el-select>
+      </el-form-item>
       <el-form-item label="账单日">
         <BillDateRangePicker v-model="query.dateRange" @change="search" />
       </el-form-item>
@@ -229,7 +281,7 @@ function refundMismatch(row: ReconBatchItem): boolean {
     <div class="toolbar">
       <div class="toolbar__title">
         对账批次
-        <span class="toolbar__sub">每个「通道 × 账单日」一个批次；系统每天自动对昨日账单，也可以手动发起或重跑</span>
+        <span class="toolbar__sub">每个「通道 × 账单日 × 账单类型」一个批次；交易账单核对支付 / 退款，资金账单核对收支与手续费</span>
       </div>
       <div class="toolbar__actions">
         <span v-if="autoRefreshing" class="auto-hint">
@@ -245,6 +297,11 @@ function refundMismatch(row: ReconBatchItem): boolean {
       <el-table-column label="账单日" width="110">
         <template #default="{ row }">
           <span class="bill-date">{{ row.billDate }}</span>
+        </template>
+      </el-table-column>
+      <el-table-column label="类型" width="100" align="center">
+        <template #default="{ row }">
+          <EnumTag :options="RECON_KIND" :value="row.kind" size="small" effect="plain" />
         </template>
       </el-table-column>
       <el-table-column label="通道 / 支付类型" min-width="160">
@@ -273,7 +330,8 @@ function refundMismatch(row: ReconBatchItem): boolean {
       </el-table-column>
       <el-table-column label="上游账单" min-width="180">
         <template #default="{ row }">
-          <div class="sides" :class="{ 'sides--muted': !compared(row as ReconBatchItem) }">
+          <div v-if="row.kind === 2" class="text-secondary">—</div>
+          <div v-else class="sides" :class="{ 'sides--muted': !compared(row as ReconBatchItem) }">
             <div class="sides__line" :class="{ 'sides__line--diff': payMismatch(row as ReconBatchItem) }">
               <span class="sides__label">支付</span>
               <span>{{ formatCount(row.upstreamPayCount) }} 笔</span>
@@ -289,7 +347,8 @@ function refundMismatch(row: ReconBatchItem): boolean {
       </el-table-column>
       <el-table-column label="本地记录" min-width="196">
         <template #default="{ row }">
-          <div class="sides" :class="{ 'sides--muted': !compared(row as ReconBatchItem) }">
+          <div v-if="row.kind === 2" class="text-secondary">—</div>
+          <div v-else class="sides" :class="{ 'sides--muted': !compared(row as ReconBatchItem) }">
             <div class="sides__line" :class="{ 'sides__line--diff': payMismatch(row as ReconBatchItem) }">
               <span class="sides__label">支付</span>
               <span>{{ formatCount(row.localPayCount) }} 笔</span>
@@ -310,6 +369,43 @@ function refundMismatch(row: ReconBatchItem): boolean {
                 <el-icon class="sides__warn"><WarningFilled /></el-icon>
               </el-tooltip>
             </div>
+          </div>
+        </template>
+      </el-table-column>
+      <el-table-column label="手续费（上游 / 应收）" min-width="176">
+        <template #default="{ row }">
+          <div v-if="row.kind === 2" class="text-secondary">—</div>
+          <div v-else class="sides" :class="{ 'sides--muted': !compared(row as ReconBatchItem) }">
+            <div class="sides__line" :class="{ 'sides__line--diff': feeMismatch(row as ReconBatchItem) }">
+              <span class="sides__label">上游</span>
+              <span class="money">{{ formatMoney(row.upstreamFeeAmount) }}</span>
+              <span class="sides__label">应收</span>
+              <span class="money">
+                {{ feeChecked(row as ReconBatchItem) ? formatMoney(row.expectedFeeAmount) : '—' }}
+              </span>
+              <el-tooltip
+                v-if="feeMismatch(row as ReconBatchItem)"
+                content="上游手续费与按通道费率计算的不一致，通常是费率变更或调价"
+                placement="top"
+              >
+                <el-icon class="sides__warn"><WarningFilled /></el-icon>
+              </el-tooltip>
+            </div>
+          </div>
+        </template>
+      </el-table-column>
+      <el-table-column label="资金账单（收入 / 支出 / 退款 / 手续费）" min-width="240">
+        <template #default="{ row }">
+          <div v-if="row.kind === 1" class="text-secondary">—</div>
+          <div v-else class="fund-grid" :class="{ 'sides--muted': !compared(row as ReconBatchItem) }">
+            <span class="fund-grid__label">收入</span>
+            <span class="money">{{ formatMoney(row.fundIncome) }}</span>
+            <span class="fund-grid__label">支出</span>
+            <span class="money">{{ formatMoney(row.fundExpense) }}</span>
+            <span class="fund-grid__label">退款</span>
+            <span class="money">{{ formatMoney(row.fundRefund) }}</span>
+            <span class="fund-grid__label">手续费</span>
+            <span class="money">{{ formatMoney(row.fundFee) }}</span>
           </div>
         </template>
       </el-table-column>
@@ -363,17 +459,41 @@ function refundMismatch(row: ReconBatchItem): boolean {
     <el-dialog v-model="dialogVisible" title="发起对账" width="520px" :close-on-click-modal="false" destroy-on-close>
       <el-form ref="formRef" :model="form" :rules="rules" label-width="80px" @submit.prevent>
         <el-form-item label="通道" prop="passageId">
-          <el-select v-model="form.passageId" placeholder="请选择通道" filterable style="width: 100%">
-            <el-option v-for="p in billPassages" :key="p.id" :value="p.id" :label="p.name">
+          <el-select
+            v-model="form.passageId"
+            placeholder="请选择通道"
+            filterable
+            style="width: 100%"
+            @change="onFormPassageChange"
+          >
+            <el-option v-for="p in reconPassages" :key="p.id" :value="p.id" :label="p.name">
               <span>{{ p.name }}</span>
               <span class="option-sub">{{ p.providerName || meta.providerName(p.provider) }}</span>
               <el-tag v-if="p.status !== 1" type="info" size="small" class="option-tag">已停用</el-tag>
             </el-option>
             <template #empty>
-              <div class="select-empty">没有可对账的通道（需要支付类型支持下载对账单）</div>
+              <div class="select-empty">没有可对账的通道（需要支付类型支持交易账单或资金账单）</div>
             </template>
           </el-select>
-          <div class="form-help">只列出支付类型支持下载对账单的通道。</div>
+          <div class="form-help">只列出支付类型支持交易账单或资金账单的通道。</div>
+        </el-form-item>
+        <el-form-item label="账单类型" prop="kind">
+          <el-select
+            v-model="form.kind"
+            :placeholder="form.passageId === undefined ? '请先选择通道' : '请选择账单类型'"
+            :disabled="form.passageId === undefined || kindOptions.length <= 1"
+            style="width: 100%"
+          >
+            <el-option v-for="k in kindOptions" :key="k" :value="k" :label="enumLabel(RECON_KIND, k)" />
+            <template #empty>
+              <div class="select-empty">该通道的支付类型不支持下载账单</div>
+            </template>
+          </el-select>
+          <div v-if="selectedPassage" class="form-help">
+            「{{ meta.providerName(selectedPassage.provider) }}」支持：{{
+              kindOptions.length ? kindOptions.map((k) => enumLabel(RECON_KIND, k)).join(' / ') : '无'
+            }}。交易账单核对支付 / 退款，资金账单核对账户收支与手续费。
+          </div>
         </el-form-item>
         <el-form-item label="账单日" prop="billDate">
           <el-date-picker
@@ -389,7 +509,7 @@ function refundMismatch(row: ReconBatchItem): boolean {
         </el-form-item>
       </el-form>
       <el-alert type="info" :closable="false" show-icon>
-        该通道这一天的批次已存在时，会重置并重新执行。对账只产出差异，不会自动改账。
+        同一通道、账单日、账单类型的批次已存在时，会重置并重新执行。对账只产出差异，不会自动改账。
       </el-alert>
       <template #footer>
         <el-button @click="dialogVisible = false">取消</el-button>
@@ -452,6 +572,17 @@ function refundMismatch(row: ReconBatchItem): boolean {
 .sides__warn {
   color: var(--el-color-danger);
   cursor: help;
+}
+.fund-grid {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 2px 10px;
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+.fund-grid__label {
+  color: var(--el-text-color-secondary);
+  font-size: 12px;
 }
 .diff-links {
   display: inline-flex;

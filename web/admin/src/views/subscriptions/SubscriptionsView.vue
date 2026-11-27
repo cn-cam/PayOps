@@ -12,7 +12,7 @@ import EnumTag from '@/components/EnumTag.vue'
 import ProviderSelect from '@/components/ProviderSelect.vue'
 import TablePager from '@/components/TablePager.vue'
 import TimeRangePicker from '@/components/TimeRangePicker.vue'
-import { AUTO_RENEW, SUBSCRIPTION_STATUS } from '@/utils/enums'
+import { AUTO_RENEW, SUBSCRIPTION_MODE, SUBSCRIPTION_STATUS } from '@/utils/enums'
 import { formatMoney } from '@/utils/money'
 import { expiryInfo } from '@/utils/subscription'
 import { formatTime, rangeToQuery, type DateRange } from '@/utils/time'
@@ -38,7 +38,7 @@ function queryString(key: string): string {
 
 function initialStatus(): SubscriptionStatus | undefined {
   const v = queryString('status')
-  return v === '1' || v === '2' || v === '3' ? (Number(v) as SubscriptionStatus) : undefined
+  return v === '1' || v === '2' || v === '3' || v === '4' ? (Number(v) as SubscriptionStatus) : undefined
 }
 
 function initialAutoRenew(): boolean | undefined {
@@ -93,22 +93,22 @@ function openDetail(subNo: string) {
       <div class="toolbar">
         <div class="toolbar__title">
           订阅是怎么运转的
-          <span class="toolbar__sub">自动续费订阅：一次签约，之后由支付平台 / 应用商店按周期自动扣款</span>
+          <span class="toolbar__sub">签约代扣 = 本系统按周期发起扣款；商店订阅 = 商店扣款</span>
         </div>
       </div>
       <div class="flow-steps">
         <div class="flow-steps__step">
           <span class="flow-steps__no">1</span>
           <div>
-            <div class="flow-steps__title">首购</div>
-            <div class="flow-steps__desc">用户支付一笔「订阅首购」订单，支付成功后创建订阅并开始第一个周期</div>
+            <div class="flow-steps__title">首购 / 签约</div>
+            <div class="flow-steps__desc">商店订阅由首购订单创建；签约代扣由签约单建立协议，之后按周期自动扣款</div>
           </div>
         </div>
         <div class="flow-steps__step">
           <span class="flow-steps__no">2</span>
           <div>
             <div class="flow-steps__title">每期续费</div>
-            <div class="flow-steps__desc">到期前上游自动扣款，每扣一期生成一笔「订阅续费」订单，到期时间顺延</div>
+            <div class="flow-steps__desc">商店订阅由商店扣款并回调；签约代扣由本系统到期发起扣款，成功后生成续费单并顺延周期</div>
           </div>
         </div>
         <div class="flow-steps__step">
@@ -201,6 +201,11 @@ function openDetail(subNo: string) {
             </div>
           </template>
         </el-table-column>
+        <el-table-column label="模式" width="120" align="center">
+          <template #default="{ row }">
+            <EnumTag :options="SUBSCRIPTION_MODE" :value="row.mode" size="small" effect="plain" />
+          </template>
+        </el-table-column>
         <el-table-column label="商品 / 用户" min-width="140">
           <template #default="{ row }">
             <div class="cell-stack">
@@ -240,6 +245,19 @@ function openDetail(subNo: string) {
                 {{ expiryInfo(row as SubscriptionItem).text }}
               </span>
             </div>
+          </template>
+        </el-table-column>
+        <el-table-column label="下次扣款" width="150">
+          <template #default="{ row }">
+            <div v-if="row.mode === 1" class="cell-stack">
+              <span v-if="row.status === 4" class="text-warning">已暂停</span>
+              <span v-else-if="!row.autoRenew" class="text-secondary">已退订</span>
+              <span v-else>{{ formatTime(row.nextChargeAt) }}</span>
+              <span v-if="row.chargeFailCount > 0" class="text-danger text-small">
+                连续失败 {{ row.chargeFailCount }} 次
+              </span>
+            </div>
+            <span v-else class="text-secondary">—</span>
           </template>
         </el-table-column>
         <el-table-column label="创建时间" width="165">

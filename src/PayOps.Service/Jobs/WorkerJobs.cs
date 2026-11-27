@@ -23,7 +23,8 @@ public sealed class DispatchJob(IServiceProvider services, ILogger<DispatchJob> 
         LoopAsync("refund-check-dispatch", TimeSpan.FromSeconds(10), DispatchRefundChecksAsync, stoppingToken),
         LoopAsync("subscription-check-dispatch", TimeSpan.FromSeconds(30), DispatchSubscriptionChecksAsync, stoppingToken),
         LoopAsync("recon-dispatch", TimeSpan.FromSeconds(30), DispatchReconAsync, stoppingToken),
-        LoopAsync("recon-schedule", TimeSpan.FromMinutes(5), ScheduleReconAsync, stoppingToken));
+        LoopAsync("recon-schedule", TimeSpan.FromMinutes(5), ScheduleReconAsync, stoppingToken),
+        LoopAsync("deduct-charge", TimeSpan.FromSeconds(20), DispatchDeductAsync, stoppingToken));
 
     private async Task LoopAsync(string name, TimeSpan interval, Func<CancellationToken, Task<int>> work, CancellationToken ct)
     {
@@ -88,6 +89,16 @@ public sealed class DispatchJob(IServiceProvider services, ILogger<DispatchJob> 
         await mq.EnsureConnectedAsync(ct);
         var due = await services.GetRequiredService<ReconService>().ClaimDueAsync(20);
         foreach (var id in due) await mq.PublishAsync(MqBus.CheckQueue, "recon:" + id, ct);
+        return due.Count;
+    }
+
+    /// <summary>签约代扣：领取到期的订阅并派发扣款任务。</summary>
+    private async Task<int> DispatchDeductAsync(CancellationToken ct)
+    {
+        var mq = services.GetRequiredService<MqBus>();
+        await mq.EnsureConnectedAsync(ct);
+        var due = await services.GetRequiredService<SubscriptionService>().ClaimDueChargesAsync(BatchSize);
+        foreach (var subNo in due) await mq.PublishAsync(MqBus.CheckQueue, "charge:" + subNo, ct);
         return due.Count;
     }
 
@@ -172,6 +183,8 @@ public sealed class ConsumerJob(IServiceProvider services, IOptions<PayOpsOption
             return services.GetRequiredService<SubscriptionService>().CheckAsync(body[4..], ct);
         if (body.StartsWith("recon:", StringComparison.Ordinal) && long.TryParse(body[6..], out var batchId))
             return services.GetRequiredService<ReconService>().RunAsync(batchId, ct);
+        if (body.StartsWith("charge:", StringComparison.Ordinal))
+            return services.GetRequiredService<SubscriptionService>().ChargeAsync(body[7..], ct);
         return Task.CompletedTask;
     }
 

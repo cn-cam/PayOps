@@ -44,7 +44,7 @@ public sealed class NotifyService(
         mchOrderNo = o.MchOrderNo,
         orderType = (int)o.OrderType,
         subNo = o.SubNo,
-        subscription = sub is null ? null : new { subNo = sub.SubNo, status = (int)sub.Status, autoRenew = sub.AutoRenew, periodStart = sub.PeriodStart, expiresAt = sub.ExpiresAt, renewCount = sub.RenewCount },
+        subscription = sub is null ? null : new { subNo = sub.SubNo, mode = (int)sub.Mode, status = (int)sub.Status, autoRenew = sub.AutoRenew, productId = sub.ProductId, nextProductId = sub.NextProductId, periodStart = sub.PeriodStart, expiresAt = sub.ExpiresAt, renewCount = sub.RenewCount },
         channel = o.ChannelCode,
         provider = o.Provider,
         payMethod = o.PayMethod,
@@ -87,10 +87,13 @@ public sealed class NotifyService(
         subNo = s.SubNo,
         channel = s.ChannelCode,
         provider = s.Provider,
-        productId = s.ProductId,
         userId = s.UserId,
+        mode = (int)s.Mode,
         status = (int)s.Status,
         autoRenew = s.AutoRenew,
+        productId = s.ProductId,
+        nextProductId = s.NextProductId,
+        pausedAt = s.PausedAt,
         periodStart = s.PeriodStart,
         expiresAt = s.ExpiresAt,
         cancelAt = s.CancelAt,
@@ -204,7 +207,7 @@ public sealed class NotifyService(
             case NotifyType.Pay:
                 return "pay.success";
             case NotifyType.Subscription:
-                foreach (var name in new[] { "canceled", "resumed", "expired", "revoked" })
+                foreach (var name in new[] { "canceled", "resumed", "resumed-from-pause", "expired", "revoked", "upgraded", "downgraded", "paused" })
                     if (task.Payload.Contains($"\"event\":\"{name}\"", StringComparison.Ordinal)) return "subscription." + name;
                 return "subscription.changed";
             default:

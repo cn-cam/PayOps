@@ -227,7 +227,7 @@ public sealed partial class AdminConfigService(
     {
         var where = new SqlWhere().Add("p.provider = {0}", provider).Add("p.status = {0}", status).Like("p.name", keyword);
         var result = await db.PageAsync<PassageItem>(
-            "p.id, p.name, p.provider, p.status, p.remark, p.created_at, p.updated_at, (SELECT COUNT(*) FROM pay_channel_passage b WHERE b.passage_id = p.id) AS binding_count",
+            "p.id, p.name, p.provider, p.status, p.fee_rate_bp, p.remark, p.created_at, p.updated_at, (SELECT COUNT(*) FROM pay_channel_passage b WHERE b.passage_id = p.id) AS binding_count",
             "pay_passage p", where, "p.id DESC", page, pageSize);
         foreach (var item in result.Items) Decorate(item);
         return result;
@@ -253,7 +253,7 @@ public sealed partial class AdminConfigService(
         var p = await db.GetAsync<PayPassage>(id) ?? throw NotFound("通道不存在");
         var detail = new PassageDetail
         {
-            Id = p.Id, Name = p.Name, Provider = p.Provider, Status = p.Status, Remark = p.Remark,
+            Id = p.Id, Name = p.Name, Provider = p.Provider, Status = p.Status, FeeRateBp = p.FeeRateBp, Remark = p.Remark,
             CreatedAt = p.CreatedAt, UpdatedAt = p.UpdatedAt,
             BindingCount = await db.ScalarAsync<int>("SELECT COUNT(*) FROM pay_channel_passage WHERE passage_id=@id", new { id }),
         };
@@ -280,6 +280,7 @@ public sealed partial class AdminConfigService(
             Provider = provider.Meta.Code,
             ConfigCipher = protector.Protect(JsonSerializer.Serialize(config)),
             Status = input.Status == 0 ? 0 : 1,
+            FeeRateBp = ValidateFeeRate(input.FeeRateBp),
             Remark = input.Remark,
             CreatedAt = now,
             UpdatedAt = now,
@@ -295,8 +296,8 @@ public sealed partial class AdminConfigService(
         if (input.Name.Trim().Length is 0 or > 64) throw Invalid("通道名称长度需在 1~64 之间");
         var config = MergeConfig(provider, ConfigCache.DecryptConfig(protector, p.ConfigCipher), input.Config);
         await db.ExecuteAsync(
-            "UPDATE pay_passage SET name=@name, config_cipher=@cipher, status=@status, remark=@remark, updated_at=@now WHERE id=@id",
-            new { id, name = input.Name.Trim(), cipher = protector.Protect(JsonSerializer.Serialize(config)), status = input.Status == 0 ? 0 : 1, remark = input.Remark, now = DateTime.UtcNow });
+            "UPDATE pay_passage SET name=@name, config_cipher=@cipher, status=@status, fee_rate_bp=@feeRate, remark=@remark, updated_at=@now WHERE id=@id",
+            new { id, name = input.Name.Trim(), cipher = protector.Protect(JsonSerializer.Serialize(config)), status = input.Status == 0 ? 0 : 1, feeRate = ValidateFeeRate(input.FeeRateBp), remark = input.Remark, now = DateTime.UtcNow });
         await cache.InvalidateAllAsync();
     }
 
@@ -478,6 +479,10 @@ public sealed partial class AdminConfigService(
             }).ToList(),
         };
     }
+
+    /// <summary>手续费率（万分比）：0~10000（0%~100%）。</summary>
+    private static int ValidateFeeRate(int bp) =>
+        bp is >= 0 and <= 10_000 ? bp : throw Invalid("手续费率需在 0~10000 万分比之间");
 
     private static PayException Invalid(string message) => new(ErrorCodes.InvalidParam, message);
 

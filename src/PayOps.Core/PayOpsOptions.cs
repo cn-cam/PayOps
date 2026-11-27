@@ -108,4 +108,6 @@ public sealed class ReconOptions
     /// <summary>账单未就绪时的最大尝试次数与重试间隔。</summary>
     public int MaxAttempts { get; set; } = 6;
     public int RetryMinutes { get; set; } = 60;
+    /// <summary>手续费与资金账单核对的容差（分）。</summary>
+    public long FeeTolerance { get; set; } = 1;
 }

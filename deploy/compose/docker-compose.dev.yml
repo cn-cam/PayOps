@@ -11,7 +11,7 @@
 name: payops-dev
 
 x-payops: &payops
-  image: ${PAYOPS_IMAGE:-payops:1.1.1}
+  image: ${PAYOPS_IMAGE:-payops:1.2.0}
   build:
     context: ../..
     dockerfile: deploy/docker/Dockerfile

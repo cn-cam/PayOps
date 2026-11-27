@@ -22,6 +22,7 @@ public sealed class SubscriptionService(
     OrderService orders,
     NotifyService notify,
     IPayProviderRegistry providers,
+    OrderNoGenerator orderNo,
     ILogger<SubscriptionService> logger)
 {
     private static readonly TimeSpan CheckLease = TimeSpan.FromSeconds(120);
@@ -80,8 +81,184 @@ public sealed class SubscriptionService(
 
         if (sub is null) return (NotifyOutcome.Success, "订阅不存在，忽略");
         if (sub.PassageId != passageId) return (NotifyOutcome.OrderNotFound, "订阅不属于该通道");
-        var changed = await ApplyStateAsync(sub, e.SubKind, info.ExpiresAt);
+        var changed = await ApplyStateAsync(sub, e.SubKind, info);
         return (NotifyOutcome.Success, changed ? $"订阅 {sub.SubNo} 状态已更新：{Describe(e.SubKind)}" : "订阅状态无变化");
+    }
+
+    /// <summary>签约结果：签约单 + 代扣订阅。</summary>
+    public async Task<(NotifyOutcome Outcome, string Message)> HandleAgreementAsync(NotifyEvent e, string provider, long passageId)
+    {
+        if (e.Agreement is not { } agreement) return (NotifyOutcome.Error, "签约事件缺少协议信息");
+        if (e.OrderNo.Length > 0)
+        {
+            var order = await orders.FindAsync(e.OrderNo);
+            if (order is null) return (NotifyOutcome.OrderNotFound, $"签约单 {e.OrderNo} 不存在");
+            if (order.PassageId != passageId) return (NotifyOutcome.OrderNotFound, "签约单不属于该通道");
+            if (!agreement.Signed)
+            {
+                await db.ExecuteAsync("UPDATE pay_order SET status = 2, closed_at = @now, updated_at = @now WHERE id = @Id AND status = 0",
+                    new { order.Id, now = DateTime.UtcNow });
+                return (NotifyOutcome.Success, "签约未成功，签约单已关闭");
+            }
+            await ActivateAsync(order, agreement, passageId);
+            return (NotifyOutcome.Success, "签约成功，代扣订阅已建立");
+        }
+
+        // 没有签约单号的签约通知（例如已存在的协议重新生效）
+        var existing = await FindByUpstreamAsync(provider, agreement.AgreementId);
+        if (existing is not null)
+        {
+            await ApplyStateAsync(existing, SubscriptionEventKind.AutoRenewOn);
+            return (NotifyOutcome.Success, "签约已恢复");
+        }
+        return (NotifyOutcome.Success, "签约事件未关联签约单，已忽略");
+    }
+
+    private async Task ActivateAsync(PayOrder order, AgreementInfo agreement, long passageId)
+    {
+        var interval = 30;
+        if (!string.IsNullOrEmpty(order.Extra))
+        {
+            try
+            {
+                using var doc = System.Text.Json.JsonDocument.Parse(order.Extra);
+                if (doc.RootElement.TryGetProperty("periodDays", out var days) && days.ValueKind == System.Text.Json.JsonValueKind.String
+                    && int.TryParse(days.GetString(), out var parsed) && parsed is > 0 and <= 3650)
+                    interval = parsed;
+            }
+            catch (System.Text.Json.JsonException)
+            {
+            }
+        }
+
+        var now = DateTime.UtcNow;
+        var next = (agreement.SignedAt ?? now).AddDays(interval);
+        var sub = new PaySubscription
+        {
+            SubNo = orderNo.Next('S'),
+            AppId = order.AppId,
+            AppCode = order.AppCode,
+            ChannelId = order.ChannelId,
+            ChannelCode = order.ChannelCode,
+            PassageId = order.PassageId,
+            Provider = order.Provider,
+            Mode = SubscriptionMode.Deduct,
+            ProductId = order.ProductId,
+            UserId = order.UserId,
+            UpstreamSubId = agreement.AgreementId,
+            UpstreamToken = agreement.PayerId,
+            Status = SubscriptionStatus.Active,
+            AutoRenew = true,
+            Amount = order.Amount,
+            PeriodStart = agreement.SignedAt ?? now,
+            ExpiresAt = next,
+            RenewCount = 0,
+            FirstOrderNo = order.OrderNo,
+            LastOrderNo = order.OrderNo,
+            NotifyUrl = order.NotifyUrl,
+            Attach = order.Attach,
+            NextCheckAt = next,
+            NextChargeAt = next,
+            ChargeIntervalDays = interval,
+            CreatedAt = now,
+            UpdatedAt = now,
+        };
+
+        var url = await notify.ResolveUrlAsync(order.AppId, order.NotifyUrl);
+        var taskId = await db.TransactionAsync(async (conn, tx) =>
+        {
+            sub.Id = await Db.InsertAsync(conn, tx, sub);
+            await conn.ExecuteAsync(
+                "UPDATE pay_order SET status = 1, sub_no = @SubNo, paid_at = @now, next_check_at = NULL, updated_at = @now WHERE id = @Id AND status = 0",
+                new { sub.SubNo, order.Id, now }, tx);
+            return await notify.InsertTaskAsync(conn, tx, order.AppId, order.AppCode, NotifyType.Subscription,
+                $"{sub.SubNo}-SIGN-{new DateTimeOffset(now).ToUnixTimeMilliseconds():x}", url, NotifyService.BuildSubscriptionPayload(sub, "signed"));
+        });
+        await notify.EnqueueAsync(taskId);
+        logger.LogInformation("签约成功：订阅 {SubNo}，协议 {Agreement}，每 {Days} 天扣款 {Amount} 分", sub.SubNo, agreement.AgreementId, interval, sub.Amount);
+    }
+
+    // ------------------------------------------------------------------ 签约代扣
+
+    public Task<List<string>> ClaimDueChargesAsync(int batchSize) =>
+        db.TransactionAsync(async (conn, tx) =>
+        {
+            var due = (await conn.QueryAsync<string>(
+                """
+                SELECT sub_no FROM pay_subscription
+                WHERE mode = 1 AND status = 1 AND auto_renew = 1 AND next_charge_at <= UTC_TIMESTAMP(3)
+                ORDER BY next_charge_at LIMIT @batchSize FOR UPDATE SKIP LOCKED
+                """, new { batchSize }, tx)).AsList();
+            if (due.Count > 0)
+                await conn.ExecuteAsync(
+                    "UPDATE pay_subscription SET next_charge_at = DATE_ADD(UTC_TIMESTAMP(3), INTERVAL @lease SECOND) WHERE sub_no IN @due",
+                    new { lease = (int)CheckLease.TotalSeconds, due }, tx);
+            return due;
+        });
+
+    private static readonly int[] ChargeBackoffDays = [1, 2, 3, 7, 15];
+
+    /// <summary>发起一次代扣：建扣款单 → 调上游扣款 → 成功即入账并顺延周期；失败按天退避。</summary>
+    public async Task<SyncResult> ChargeAsync(string subNo, CancellationToken ct)
+    {
+        var sub = await FindAsync(subNo);
+        if (sub is null || sub.Mode != SubscriptionMode.Deduct) return new SyncResult(0, false, "订阅不存在或不是签约代扣");
+        if (sub.Status != SubscriptionStatus.Active || !sub.AutoRenew) return new SyncResult((int)sub.Status, false, "订阅已停止续订，不再扣款");
+
+        var (provider, context) = await ContextAsync(sub);
+        if (!provider.Meta.Capabilities.Deduct) return new SyncResult((int)sub.Status, false, $"{provider.Meta.Name}不支持签约代扣");
+
+        var now = DateTime.UtcNow;
+        var order = await orders.CreateDeductOrderAsync(sub, now);
+        try
+        {
+            var result = await provider.DeductAsync(new DeductContext
+            {
+                PassageId = sub.PassageId,
+                Config = context.Config,
+                AgreementId = sub.UpstreamSubId,
+                OrderNo = order.OrderNo,
+                ProductId = sub.ProductId,
+                Amount = sub.Amount,
+                Subject = order.Subject,
+                NotifyUrl = orders.UpstreamNotifyUrl(sub.Provider, sub.PassageId, "deduct"),
+                PayerId = sub.UpstreamToken,
+            }, ct);
+
+            if (result.Paid)
+            {
+                var outcome = await orders.CompleteDeductAsync(order, result.UpstreamTradeNo ?? "DEDUCT" + order.OrderNo, result.PaidAt ?? now, sub.ProductId);
+                return outcome switch
+                {
+                    RenewalOutcome.Renewed => new SyncResult((int)SubscriptionStatus.Active, true, "代扣成功，已入账并顺延周期"),
+                    RenewalOutcome.Duplicate => new SyncResult((int)SubscriptionStatus.Active, false, "该笔扣款已入账"),
+                    _ => new SyncResult((int)sub.Status, false, "代扣结果无法入账"),
+                };
+            }
+
+            // 受理中：等上游回调/查询
+            await db.ExecuteAsync(
+                "UPDATE pay_subscription SET next_charge_at = @next, updated_at = UTC_TIMESTAMP(3) WHERE id = @Id",
+                new { sub.Id, next = now.AddMinutes(30) });
+            return new SyncResult((int)sub.Status, false, $"扣款受理中：{result.Message}");
+        }
+        catch (ProviderException ex)
+        {
+            logger.LogWarning("订阅 {SubNo} 代扣失败（第 {Count} 次）：{Message}", sub.SubNo, sub.ChargeFailCount + 1, ex.Message);
+            var fails = sub.ChargeFailCount + 1;
+            var backoff = ChargeBackoffDays[Math.Min(fails - 1, ChargeBackoffDays.Length - 1)];
+            await db.TransactionAsync(async (conn, tx) =>
+            {
+                await conn.ExecuteAsync(
+                    "UPDATE pay_order SET status = 3, error_code = @code, error_msg = @message, next_check_at = NULL, updated_at = UTC_TIMESTAMP(3) WHERE id = @Id AND status = 0",
+                    new { order.Id, code = ex.Code, message = ex.Message, }, tx);
+                await conn.ExecuteAsync(
+                    "UPDATE pay_subscription SET charge_fail_count = charge_fail_count + 1, next_charge_at = @next, updated_at = UTC_TIMESTAMP(3) WHERE id = @Id",
+                    new { sub.Id, next = now.AddDays(backoff) }, tx);
+                return 0;
+            });
+            return new SyncResult((int)sub.Status, false, $"代扣失败（{fails} 次），{backoff} 天后重试：{ex.Message}");
+        }
     }
 
     private async Task<(NotifyOutcome, string)> HandleInitialAsync(NotifyEvent e, SubscriptionInfo info, long passageId)
@@ -107,19 +284,32 @@ public sealed class SubscriptionService(
     /// <summary>
     /// 应用一次状态变化。每种变化都是带前置条件的更新，只有真正发生变化时才写业务通知（同一事务）。
     /// </summary>
-    public async Task<bool> ApplyStateAsync(PaySubscription sub, SubscriptionEventKind kind, DateTime? expiresAt = null)
+    public async Task<bool> ApplyStateAsync(PaySubscription sub, SubscriptionEventKind kind, SubscriptionInfo? info = null)
     {
         var now = DateTime.UtcNow;
+        var expiresAt = info?.ExpiresAt;
+        var productId = info?.ProductId is { Length: > 0 } p ? p : sub.ProductId;
+        var nextProductId = info?.NextProductId ?? "";
         var (sql, eventName) = kind switch
         {
             SubscriptionEventKind.AutoRenewOff =>
-                ("UPDATE pay_subscription SET auto_renew = 0, cancel_at = @now, expires_at = COALESCE(@expiresAt, expires_at), updated_at = @now WHERE id = @Id AND status = 1 AND auto_renew = 1", "canceled"),
+                ("UPDATE pay_subscription SET auto_renew = 0, cancel_at = @now, expires_at = COALESCE(@expiresAt, expires_at), updated_at = @now WHERE id = @Id AND status IN (1, 4) AND auto_renew = 1", "canceled"),
             SubscriptionEventKind.AutoRenewOn =>
-                ("UPDATE pay_subscription SET auto_renew = 1, cancel_at = NULL, expires_at = COALESCE(@expiresAt, expires_at), updated_at = @now WHERE id = @Id AND status = 1 AND auto_renew = 0", "resumed"),
+                ("UPDATE pay_subscription SET auto_renew = 1, cancel_at = NULL, expires_at = COALESCE(@expiresAt, expires_at), updated_at = @now WHERE id = @Id AND status IN (1, 4) AND auto_renew = 0", "resumed"),
             SubscriptionEventKind.Expired =>
-                ("UPDATE pay_subscription SET status = 2, auto_renew = 0, next_check_at = NULL, updated_at = @now WHERE id = @Id AND status = 1", "expired"),
+                ("UPDATE pay_subscription SET status = 2, auto_renew = 0, next_check_at = NULL, next_charge_at = NULL, updated_at = @now WHERE id = @Id AND status IN (1, 4)", "expired"),
             SubscriptionEventKind.Revoked =>
-                ("UPDATE pay_subscription SET status = 3, auto_renew = 0, next_check_at = NULL, updated_at = @now WHERE id = @Id AND status <> 3", "revoked"),
+                ("UPDATE pay_subscription SET status = 3, auto_renew = 0, next_check_at = NULL, next_charge_at = NULL, updated_at = @now WHERE id = @Id AND status <> 3", "revoked"),
+            // 立即升级/换购：本期商品已变，预约的下一期商品作废
+            SubscriptionEventKind.Upgraded =>
+                ("UPDATE pay_subscription SET product_id = @productId, upstream_product_id = @productId, next_product_id = '', expires_at = COALESCE(@expiresAt, expires_at), updated_at = @now WHERE id = @Id AND status IN (1, 4) AND product_id <> @productId", "upgraded"),
+            // 降级：下一期生效，本期不变
+            SubscriptionEventKind.Downgraded =>
+                ("UPDATE pay_subscription SET next_product_id = @nextProductId, updated_at = @now WHERE id = @Id AND status IN (1, 4) AND next_product_id <> @nextProductId", "downgraded"),
+            SubscriptionEventKind.Paused =>
+                ("UPDATE pay_subscription SET status = 4, paused_at = @now, updated_at = @now WHERE id = @Id AND status = 1", "paused"),
+            SubscriptionEventKind.Resumed =>
+                ("UPDATE pay_subscription SET status = 1, paused_at = NULL, expires_at = COALESCE(@expiresAt, expires_at), updated_at = @now WHERE id = @Id AND status = 4", "resumed-from-pause"),
             _ => ("", ""),
         };
         if (sql.Length == 0) return false;
@@ -127,7 +317,7 @@ public sealed class SubscriptionService(
         var url = await notify.ResolveUrlAsync(sub.AppId, sub.NotifyUrl);
         var taskId = await db.TransactionAsync(async (conn, tx) =>
         {
-            if (await conn.ExecuteAsync(sql, new { sub.Id, now, expiresAt }, tx) == 0) return -1L;
+            if (await conn.ExecuteAsync(sql, new { sub.Id, now, expiresAt, productId, nextProductId }, tx) == 0) return -1L;
             var latest = await conn.QueryFirstAsync<PaySubscription>("SELECT * FROM pay_subscription WHERE id = @Id", new { sub.Id }, tx);
             Copy(latest, sub);
             var bizNo = $"{sub.SubNo}-{eventName[..2].ToUpperInvariant()}-{new DateTimeOffset(now).ToUnixTimeMilliseconds():x}";
@@ -150,6 +340,12 @@ public sealed class SubscriptionService(
         to.RenewCount = from.RenewCount;
         to.LastOrderNo = from.LastOrderNo;
         to.NextCheckAt = from.NextCheckAt;
+        to.ProductId = from.ProductId;
+        to.NextProductId = from.NextProductId;
+        to.UpstreamProductId = from.UpstreamProductId;
+        to.PausedAt = from.PausedAt;
+        to.NextChargeAt = from.NextChargeAt;
+        to.ChargeFailCount = from.ChargeFailCount;
         to.UpdatedAt = from.UpdatedAt;
     }
 
@@ -159,6 +355,10 @@ public sealed class SubscriptionService(
         SubscriptionEventKind.AutoRenewOn => "已恢复续订",
         SubscriptionEventKind.Expired => "已到期",
         SubscriptionEventKind.Revoked => "已撤销",
+        SubscriptionEventKind.Upgraded => "已升级（本期商品已变更）",
+        SubscriptionEventKind.Downgraded => "已降级（下一期生效）",
+        SubscriptionEventKind.Paused => "已暂停",
+        SubscriptionEventKind.Resumed => "已从暂停恢复",
         _ => kind.ToString(),
     };
 
@@ -181,9 +381,24 @@ public sealed class SubscriptionService(
     /// <summary>服务端退订：停止自动续订，当前周期仍然有效。</summary>
     public async Task<PaySubscription> CancelAsync(PaySubscription sub, CancellationToken ct)
     {
-        if (sub.Status != SubscriptionStatus.Active) throw new PayException(ErrorCodes.OrderStateError, "订阅已失效，无需退订");
+        if (sub.Status is not (SubscriptionStatus.Active or SubscriptionStatus.Paused)) throw new PayException(ErrorCodes.OrderStateError, "订阅已失效，无需退订");
         if (!sub.AutoRenew) return sub;
         var (provider, context) = await ContextAsync(sub);
+        if (sub.Mode == SubscriptionMode.Deduct)
+        {
+            // 代扣：解约即终止协议，之后不再扣款
+            try
+            {
+                await provider.CancelAgreementAsync(context, ct);
+            }
+            catch (ProviderException ex)
+            {
+                throw new PayException(ErrorCodes.PassageError, "解约失败：" + ex.Message);
+            }
+            await ApplyStateAsync(sub, SubscriptionEventKind.AutoRenewOff);
+            await db.ExecuteAsync("UPDATE pay_subscription SET next_charge_at = NULL, updated_at = UTC_TIMESTAMP(3) WHERE id = @Id", new { sub.Id });
+            return sub;
+        }
         if (!provider.Meta.Capabilities.SubscriptionCancel)
             throw new PayException(ErrorCodes.NotSupported, $"{provider.Meta.Name}不支持服务端退订，请引导用户在商店的订阅管理页退订；退订结果会通过通知自动同步");
         try
@@ -230,12 +445,30 @@ public sealed class SubscriptionService(
             changed |= outcome == RenewalOutcome.Renewed;
         }
 
+        // 商品变化：上游当前商品与本系统不同 → 升级；上游给出下一期商品 → 降级预约
+        if (state.Active && state.ProductId is { Length: > 0 } current && current != sub.ProductId)
+            changed |= await ApplyStateAsync(sub, SubscriptionEventKind.Upgraded, new SubscriptionInfo
+            {
+                UpstreamSubId = sub.UpstreamSubId, Token = sub.UpstreamToken, ProductId = current, ExpiresAt = state.ExpiresAt,
+            });
+        else if (state.Active && state.NextProductId is { Length: > 0 } next && next != sub.NextProductId)
+            changed |= await ApplyStateAsync(sub, SubscriptionEventKind.Downgraded, new SubscriptionInfo
+            {
+                UpstreamSubId = sub.UpstreamSubId, Token = sub.UpstreamToken, NextProductId = next, ExpiresAt = state.ExpiresAt,
+            });
+
+        if (state.Paused && sub.Status == SubscriptionStatus.Active)
+            changed |= await ApplyStateAsync(sub, SubscriptionEventKind.Paused);
+        else if (!state.Paused && sub.Status == SubscriptionStatus.Paused && state.Active)
+            changed |= await ApplyStateAsync(sub, SubscriptionEventKind.Resumed,
+                new SubscriptionInfo { UpstreamSubId = sub.UpstreamSubId, Token = sub.UpstreamToken, ExpiresAt = state.ExpiresAt });
+
         if (state.Active)
         {
-            if (sub.Status == SubscriptionStatus.Active && state.AutoRenew != sub.AutoRenew)
-                changed |= await ApplyStateAsync(sub, state.AutoRenew ? SubscriptionEventKind.AutoRenewOn : SubscriptionEventKind.AutoRenewOff, state.ExpiresAt);
+            if (sub.Status is SubscriptionStatus.Active && state.AutoRenew != sub.AutoRenew)
+                changed |= await ApplyStateAsync(sub, state.AutoRenew ? SubscriptionEventKind.AutoRenewOn : SubscriptionEventKind.AutoRenewOff);
         }
-        else if (sub.Status == SubscriptionStatus.Active)
+        else if (sub.Status == SubscriptionStatus.Active && !state.Paused)
         {
             changed |= await ApplyStateAsync(sub, SubscriptionEventKind.Expired);
         }
@@ -249,7 +482,7 @@ public sealed class SubscriptionService(
         db.TransactionAsync(async (conn, tx) =>
         {
             var due = (await conn.QueryAsync<string>(
-                "SELECT sub_no FROM pay_subscription WHERE status = 1 AND next_check_at <= UTC_TIMESTAMP(3) ORDER BY next_check_at LIMIT @batchSize FOR UPDATE SKIP LOCKED",
+                "SELECT sub_no FROM pay_subscription WHERE status IN (1, 4) AND next_check_at <= UTC_TIMESTAMP(3) ORDER BY next_check_at LIMIT @batchSize FOR UPDATE SKIP LOCKED",
                 new { batchSize }, tx)).AsList();
             if (due.Count > 0)
                 await conn.ExecuteAsync(
@@ -262,22 +495,25 @@ public sealed class SubscriptionService(
     public async Task CheckAsync(string subNo, CancellationToken ct)
     {
         var sub = await FindAsync(subNo);
-        if (sub is null || sub.Status != SubscriptionStatus.Active) return;
+        if (sub is null || sub.Status is not (SubscriptionStatus.Active or SubscriptionStatus.Paused)) return;
 
         var (_, queryable) = await SyncCoreAsync(sub, ct);
         sub = await FindAsync(subNo);
-        if (sub is null || sub.Status != SubscriptionStatus.Active) return;
+        if (sub is null || sub.Status is not (SubscriptionStatus.Active or SubscriptionStatus.Paused)) return;
 
         var now = DateTime.UtcNow;
-        if (sub.ExpiresAt is { } expires && expires <= now && now - expires > (queryable ? GraceKnown : GraceUnknown))
+        if (sub.Status == SubscriptionStatus.Active && sub.ExpiresAt is { } expires && expires <= now && now - expires > (queryable ? GraceKnown : GraceUnknown))
         {
             await ApplyStateAsync(sub, SubscriptionEventKind.Expired);
             return;
         }
 
-        var next = sub.ExpiresAt is { } e && e > now ? e.AddMinutes(10) : now.AddHours(1);
+        // 暂停中的订阅每小时确认一次是否恢复；代扣订阅在下次扣款前无需巡检
+        var next = sub.Status == SubscriptionStatus.Paused ? now.AddHours(1)
+            : sub.Mode == SubscriptionMode.Deduct && sub.NextChargeAt is { } charge && charge > now ? charge
+            : sub.ExpiresAt is { } e && e > now ? e.AddMinutes(10) : now.AddHours(1);
         await db.ExecuteAsync(
-            "UPDATE pay_subscription SET next_check_at = @next, check_count = check_count + 1, updated_at = UTC_TIMESTAMP(3) WHERE id = @Id AND status = 1",
+            "UPDATE pay_subscription SET next_check_at = @next, check_count = check_count + 1, updated_at = UTC_TIMESTAMP(3) WHERE id = @Id AND status IN (1, 4)",
             new { sub.Id, next });
     }
 }

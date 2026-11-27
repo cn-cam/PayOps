@@ -38,6 +38,16 @@ public sealed class SubscriptionsController(
         return Done(result);
     }
 
+    /// <summary>立即发起一次代扣（签约代扣订阅）。</summary>
+    [HttpPost("{subNo}/charge")]
+    [Authorize(Roles = WriteRoles)]
+    public async Task<ApiResult> Charge(string subNo, CancellationToken ct)
+    {
+        var result = await subscriptions.ChargeAsync(subNo, ct);
+        await AuditAsync("订阅代扣", subNo, result.Message);
+        return Done(result);
+    }
+
     [HttpPost("{subNo}/cancel")]
     [Authorize(Roles = WriteRoles)]
     public async Task<ApiResult> Cancel(string subNo, CancellationToken ct)
@@ -98,7 +108,7 @@ public sealed class SubscriptionsController(
     }
 }
 
-public sealed record ReconTriggerRequest(long PassageId, string BillDate);
+public sealed record ReconTriggerRequest(long PassageId, string BillDate, int Kind = 1);
 
 public sealed record ReconHandleRequest(string Remark);
 
@@ -112,7 +122,7 @@ public sealed class ReconController(AdminQueryService query, ReconService recon,
     [Authorize(Roles = WriteRoles)]
     public async Task<ApiResult> Trigger([FromBody] ReconTriggerRequest request)
     {
-        var id = await recon.TriggerAsync(request.PassageId, request.BillDate ?? "");
+        var id = await recon.TriggerAsync(request.PassageId, request.BillDate ?? "", request.Kind);
         await AuditAsync("发起对账", $"passage:{request.PassageId}", request.BillDate);
         return Done(new { id });
     }
@@ -122,7 +132,7 @@ public sealed class ReconController(AdminQueryService query, ReconService recon,
     public async Task<ApiResult> Rerun(long id)
     {
         var batch = await db.GetAsync<PayReconBatch>(id) ?? throw new PayException(ErrorCodes.NotFound, "对账批次不存在");
-        await recon.TriggerAsync(batch.PassageId, batch.BillDate);
+        await recon.TriggerAsync(batch.PassageId, batch.BillDate, (int)batch.Kind);
         await AuditAsync("重跑对账", $"batch:{id}", batch.BillDate);
         return Done();
     }
