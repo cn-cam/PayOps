@@ -1,0 +1,64 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# 生产环境：使用外部高可用中间件。
+#   1. cp secret.env.example secret.env 并填写真实连接信息（secret.env 不要提交到代码库；
+#      也可以删掉下面的 secretGenerator，改由 ExternalSecrets / SealedSecrets / Vault 生成同名 Secret）
+#   2. 修改下方镜像地址、域名与 TLS 证书 Secret
+#   3. kubectl apply -k deploy/k8s/overlays/prod
+
+namespace: payops
+
+resources:
+  - ../../base
+
+images:
+  - name: payops
+    newName: registry.example.com/payops/payops
+    newTag: 1.0.0
+
+secretGenerator:
+  - name: payops-secret
+    envs:
+      - secret.env
+
+patches:
+  - target:
+      kind: ConfigMap
+      name: payops-config
+    patch: |-
+      - op: replace
+        path: /data/PayOps__PublicBaseUrl
+        value: https://pay.example.com
+  - target:
+      kind: Ingress
+      name: payops-gateway
+    patch: |-
+      - op: replace
+        path: /spec/rules/0/host
+        value: pay.example.com
+      - op: add
+        path: /spec/tls
+        value:
+          - hosts: ["pay.example.com"]
+            secretName: pay-example-com-tls
+  - target:
+      kind: Ingress
+      name: payops-admin
+    patch: |-
+      - op: replace
+        path: /spec/rules/0/host
+        value: pay-admin.example.com
+      - op: add
+        path: /spec/tls
+        value:
+          - hosts: ["pay-admin.example.com"]
+            secretName: pay-admin-example-com-tls
+  # 生产建议强制把副本打散到不同节点
+  - target:
+      kind: Deployment
+      name: payops-gateway
+    patch: |-
+      - op: replace
+        path: /spec/template/spec/topologySpreadConstraints/0/whenUnsatisfiable
+        value: DoNotSchedule

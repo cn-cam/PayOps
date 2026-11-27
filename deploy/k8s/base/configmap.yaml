@@ -1,0 +1,22 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: payops-config
+data:
+  TZ: Asia/Shanghai
+  ASPNETCORE_ENVIRONMENT: Production
+  ASPNETCORE_URLS: http://+:8080
+  # 对外域名：用于拼接上游回调地址，必须是上游可访问的公网 HTTPS 地址
+  PayOps__PublicBaseUrl: https://pay.example.com
+  PayOps__TimeZoneOffsetHours: "8"
+  PayOps__Database__AutoMigrate: "true"
+  PayOps__Redis__KeyPrefix: "payops:"
+  PayOps__RabbitMq__Prefix: payops
+  PayOps__RabbitMq__QueueType: quorum
+  PayOps__RabbitMq__VirtualHost: /
+  PayOps__Order__DefaultExpireSeconds: "1800"
+  PayOps__Order__MaxRouteAttempts: "3"
+  PayOps__Breaker__FailureThreshold: "5"
+  PayOps__Breaker__WindowSeconds: "60"
+  PayOps__Breaker__OpenSeconds: "30"
+  Logging__Console__FormatterName: json

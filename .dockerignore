@@ -1,0 +1,14 @@
+**/bin
+**/obj
+**/node_modules
+**/dist
+**/.vs
+**/.idea
+.git
+.opencode
+docs
+deploy
+tests
+scripts
+**/appsettings.Development.json
+**/*.user

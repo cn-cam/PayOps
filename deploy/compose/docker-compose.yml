@@ -1,0 +1,131 @@
+# PayOps 完整栈（自带 MySQL / Redis / RabbitMQ）—— 多副本部署。
+#
+#   cd deploy/compose
+#   cp .env.example .env        # 修改密钥
+#   docker compose up -d --build
+#   访问 http://localhost:8090  （管理后台，账号 admin）
+#
+# 扩缩容：docker compose up -d --scale api=4 --scale worker=3
+# 中间件在此仅为单实例演示；生产请替换为高可用实例（MySQL 主从/MGR、Redis Sentinel/Cluster、RabbitMQ 仲裁队列集群）。
+
+name: payops
+
+x-payops-image: &payops-image
+  image: ${PAYOPS_IMAGE:-payops:1.0.0}
+  build:
+    context: ../..
+    dockerfile: deploy/docker/Dockerfile
+    args:
+      NPM_REGISTRY: ${NPM_REGISTRY:-https://registry.npmjs.org}
+
+x-payops-env: &payops-env
+  TZ: Asia/Shanghai
+  PayOps__PublicBaseUrl: ${PUBLIC_BASE_URL:-http://localhost:8090}
+  PayOps__EnableDemoEndpoints: ${ENABLE_DEMO_ENDPOINTS:-false}
+  PayOps__Database__ConnectionString: Server=mysql;Port=3306;Database=payops;User ID=root;Password=${MYSQL_ROOT_PASSWORD};
+  PayOps__Redis__ConnectionString: redis:6379,password=${REDIS_PASSWORD}
+  PayOps__RabbitMq__Hosts: rabbitmq:5672
+  PayOps__RabbitMq__UserName: ${RABBITMQ_USER}
+  PayOps__RabbitMq__Password: ${RABBITMQ_PASSWORD}
+  PayOps__Security__MasterKey: ${PAYOPS_MASTER_KEY}
+  PayOps__Security__JwtKey: ${PAYOPS_JWT_KEY}
+  PayOps__Security__InitAdminPassword: ${PAYOPS_ADMIN_PASSWORD:-Admin@123456}
+
+x-payops-depends: &payops-depends
+  mysql:
+    condition: service_healthy
+  redis:
+    condition: service_healthy
+  rabbitmq:
+    condition: service_healthy
+
+services:
+  # 接入网关 + 管理后台（无状态，可任意扩缩）
+  api:
+    <<: *payops-image
+    environment:
+      <<: *payops-env
+      PayOps__Roles: Gateway,Admin
+    depends_on: *payops-depends
+    deploy:
+      replicas: 2
+    restart: unless-stopped
+    stop_grace_period: 35s
+
+  # 后台任务：通知派发/投递、掉单补偿、超时关单、退款巡检（竞争消费，可任意扩缩）
+  worker:
+    <<: *payops-image
+    environment:
+      <<: *payops-env
+      PayOps__Roles: Worker
+    depends_on: *payops-depends
+    deploy:
+      replicas: 2
+    restart: unless-stopped
+    stop_grace_period: 35s
+
+  nginx:
+    image: nginx:1.27-alpine
+    ports:
+      - "${HTTP_PORT:-8090}:80"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      - api
+    restart: unless-stopped
+
+  mysql:
+    image: mysql:8.0
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_0900_ai_ci
+      - --max-connections=1000
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      TZ: Asia/Shanghai
+    volumes:
+      - mysql-data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p$$MYSQL_ROOT_PASSWORD --silent"]
+      interval: 5s
+      timeout: 5s
+      retries: 60
+      # 首次启动要初始化数据目录，慢盘上可能超过两分钟；起步期内的失败不计入重试次数
+      start_period: 300s
+    restart: unless-stopped
+
+  redis:
+    image: redis:8
+    command: ["redis-server", "--appendonly", "yes", "--requirepass", "${REDIS_PASSWORD}"]
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a $$REDIS_PASSWORD --no-auth-warning ping | grep -q PONG"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
+    restart: unless-stopped
+
+  rabbitmq:
+    image: rabbitmq:management
+    hostname: payops-rabbitmq
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD}
+    ports:
+      - "${RABBITMQ_MGMT_PORT:-15673}:15672"
+    volumes:
+      - rabbitmq-data:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "check_port_connectivity"]
+      interval: 10s
+      timeout: 10s
+      retries: 20
+    restart: unless-stopped
+
+volumes:
+  mysql-data:
+  redis-data:
+  rabbitmq-data:

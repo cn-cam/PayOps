@@ -1,0 +1,50 @@
+# 公网入口：只暴露业务接入 API 与上游回调。
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: payops-gateway
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-body-size: 2m
+    nginx.ingress.kubernetes.io/proxy-next-upstream: error timeout
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: pay.example.com
+      http:
+        paths:
+          - path: /api/pay
+            pathType: Prefix
+            backend:
+              service:
+                name: payops-gateway
+                port:
+                  name: http
+          - path: /api/notify
+            pathType: Prefix
+            backend:
+              service:
+                name: payops-gateway
+                port:
+                  name: http
+---
+# 管理后台入口：建议使用独立的内网域名 / 内网 IngressClass，并叠加 IP 白名单。
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: payops-admin
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-body-size: 2m
+    # nginx.ingress.kubernetes.io/whitelist-source-range: 10.0.0.0/8
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: pay-admin.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: payops-admin
+                port:
+                  name: http

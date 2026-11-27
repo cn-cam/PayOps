@@ -1,0 +1,11 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/PayOps.Core/PayOps.Core.csproj" />
+    <Project Path="src/PayOps.Providers/PayOps.Providers.csproj" />
+    <Project Path="src/PayOps.Service/PayOps.Service.csproj" />
+    <Project Path="src/PayOps.Server/PayOps.Server.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/PayOps.Tests/PayOps.Tests.csproj" />
+  </Folder>
+</Solution>

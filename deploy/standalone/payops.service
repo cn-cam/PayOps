@@ -1,0 +1,28 @@
+# systemd 单元示例：/etc/systemd/system/payops.service
+#   sudo useradd -r -s /sbin/nologin payops
+#   sudo cp -r artifacts/payops /opt/payops && sudo chown -R payops:payops /opt/payops
+#   sudo systemctl daemon-reload && sudo systemctl enable --now payops
+
+[Unit]
+Description=PayOps payment service (standalone: Gateway + Admin + Worker)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=payops
+WorkingDirectory=/opt/payops
+ExecStart=/usr/bin/dotnet /opt/payops/PayOps.Server.dll
+Environment=ASPNETCORE_ENVIRONMENT=Production
+Environment=DOTNET_PRINT_TELEMETRY_MESSAGE=false
+Restart=always
+RestartSec=5
+# 与程序内的 30 秒优雅停机窗口配合：先停止接收新任务，处理完在途请求再退出
+TimeoutStopSec=40
+KillSignal=SIGTERM
+LimitNOFILE=65535
+NoNewPrivileges=true
+ProtectSystem=full
+
+[Install]
+WantedBy=multi-user.target

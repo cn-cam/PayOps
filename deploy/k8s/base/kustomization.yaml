@@ -1,0 +1,25 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# 基础清单：三个无状态工作负载（gateway / admin / worker）共用同一个镜像，靠 PayOps__Roles 区分角色。
+# 敏感配置统一从名为 payops-secret 的 Secret 读取，由 overlay（secretGenerator）或外部密钥系统提供。
+
+namespace: payops
+
+resources:
+  - namespace.yaml
+  - configmap.yaml
+  - gateway.yaml
+  - admin.yaml
+  - worker.yaml
+  - ingress.yaml
+
+labels:
+  - pairs:
+      app.kubernetes.io/part-of: payops
+    includeSelectors: false
+
+images:
+  - name: payops
+    newName: payops
+    newTag: 1.0.0

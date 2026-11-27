@@ -1,0 +1,62 @@
+# 复用宿主机上已有的演示中间件（mysql.dev / redis.dev / rabbitmq.dev，经 host.docker.internal 访问），
+# 只启动 PayOps 自身的多副本：2 个 api + 2 个 worker + Nginx 入口。
+#
+#   cd deploy/compose
+#   cp .env.dev.example .env.dev      # 按本机演示中间件的账号修改
+#   docker compose -f docker-compose.dev.yml --env-file .env.dev up -d --build
+#   访问 http://localhost:8090
+#   pwsh ../../scripts/demo.ps1 -BaseUrl http://localhost:8090 -InternalBaseUrl http://nginx
+#   （-InternalBaseUrl：演示接收端由 worker 容器回调，容器内访问不到宿主机的 localhost，需走 Nginx 服务名）
+
+name: payops-dev
+
+x-payops: &payops
+  image: ${PAYOPS_IMAGE:-payops:1.0.0}
+  build:
+    context: ../..
+    dockerfile: deploy/docker/Dockerfile
+    args:
+      NPM_REGISTRY: ${NPM_REGISTRY:-https://registry.npmjs.org}
+  extra_hosts:
+    - "host.docker.internal:host-gateway"
+  restart: unless-stopped
+  stop_grace_period: 35s
+
+x-payops-env: &payops-env
+  TZ: Asia/Shanghai
+  PayOps__PublicBaseUrl: ${PUBLIC_BASE_URL:-http://localhost:8090}
+  PayOps__EnableDemoEndpoints: "true"
+  PayOps__Database__ConnectionString: Server=host.docker.internal;Port=${MYSQL_PORT:-3306};Database=${MYSQL_DATABASE:-payops};User ID=${MYSQL_USER:-root};Password=${MYSQL_PASSWORD};
+  PayOps__Redis__ConnectionString: ${REDIS_CONNECTION:-host.docker.internal:6379}
+  PayOps__RabbitMq__Hosts: host.docker.internal:${RABBITMQ_PORT:-5672}
+  PayOps__RabbitMq__UserName: ${RABBITMQ_USER}
+  PayOps__RabbitMq__Password: ${RABBITMQ_PASSWORD}
+  PayOps__Security__MasterKey: ${PAYOPS_MASTER_KEY}
+  PayOps__Security__JwtKey: ${PAYOPS_JWT_KEY}
+
+services:
+  api:
+    <<: *payops
+    environment:
+      <<: *payops-env
+      PayOps__Roles: Gateway,Admin
+    deploy:
+      replicas: 2
+
+  worker:
+    <<: *payops
+    environment:
+      <<: *payops-env
+      PayOps__Roles: Worker
+    deploy:
+      replicas: 2
+
+  nginx:
+    image: nginx:1.27-alpine
+    ports:
+      - "${HTTP_PORT:-8090}:80"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      - api
+    restart: unless-stopped

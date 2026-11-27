@@ -1,0 +1,65 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# 演示环境：集群内自带单实例 MySQL / Redis / RabbitMQ，开箱即可体验多副本。
+#   kubectl apply -k deploy/k8s/overlays/demo
+#   kubectl -n payops port-forward svc/payops-admin 8090:80     # 管理后台
+#   kubectl -n payops port-forward svc/payops-gateway 8091:80   # 接入网关
+# 中间件均为单点且口令写在清单里，切勿用于生产。
+
+namespace: payops
+
+resources:
+  - ../../base
+  - middleware.yaml
+
+images:
+  - name: payops
+    newName: payops
+    newTag: 1.0.0
+
+secretGenerator:
+  - name: payops-secret
+    literals:
+      - PayOps__Database__ConnectionString=Server=payops-mysql;Port=3306;Database=payops;User ID=root;Password=demo-mysql-pass;
+      - PayOps__Redis__ConnectionString=payops-redis:6379,password=demo-redis-pass
+      - PayOps__RabbitMq__Hosts=payops-rabbitmq:5672
+      - PayOps__RabbitMq__UserName=payops
+      - PayOps__RabbitMq__Password=demo-rabbit-pass
+      - PayOps__Security__MasterKey=demo-master-key-do-not-use-in-production
+      - PayOps__Security__JwtKey=demo-jwt-key-do-not-use-in-production
+      - PayOps__Security__InitAdminPassword=Admin@123456
+
+patches:
+  # 演示环境资源减半，并把回调基础地址指向集群内的网关 Service
+  - target:
+      kind: ConfigMap
+      name: payops-config
+    patch: |-
+      - op: replace
+        path: /data/PayOps__PublicBaseUrl
+        value: http://payops-gateway.payops.svc
+      - op: add
+        path: /data/PayOps__EnableDemoEndpoints
+        value: "true"
+  - target:
+      kind: Deployment
+      name: payops-gateway
+    patch: |-
+      - op: replace
+        path: /spec/replicas
+        value: 2
+  - target:
+      kind: HorizontalPodAutoscaler
+      name: payops-gateway
+    patch: |-
+      - op: replace
+        path: /spec/minReplicas
+        value: 2
+  - target:
+      kind: PodDisruptionBudget
+      name: payops-gateway
+    patch: |-
+      - op: replace
+        path: /spec/minAvailable
+        value: 1

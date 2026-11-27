@@ -1,0 +1,173 @@
+:root {
+  --mono-font: ui-monospace, 'SFMono-Regular', 'Cascadia Mono', Consolas, 'Liberation Mono', Menlo, monospace;
+  --app-bg: #f3f5f9;
+  --sidebar-bg: #0f172a;
+  --sidebar-width: 216px;
+  --header-height: 56px;
+  --el-color-primary: #2563eb;
+  --el-color-primary-light-3: #6691f1;
+  --el-color-primary-light-5: #92b1f5;
+  --el-color-primary-light-7: #bed0f9;
+  --el-color-primary-light-8: #d3e0fb;
+  --el-color-primary-light-9: #e9effd;
+  --el-color-primary-dark-2: #1e4fbc;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  font-family:
+    'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', Arial, sans-serif;
+  font-size: 14px;
+  color: var(--el-text-color-primary);
+  background: var(--app-bg);
+  -webkit-font-smoothing: antialiased;
+}
+
+a {
+  color: var(--el-color-primary);
+  text-decoration: none;
+}
+
+/* ---------- 页面通用结构 ---------- */
+.page {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.page .el-card {
+  border: none;
+  border-radius: 8px;
+}
+
+.filter-card .el-card__body {
+  padding: 16px 20px 0;
+}
+
+.filter-card .el-form--inline .el-form-item {
+  margin-right: 16px;
+  margin-bottom: 16px;
+}
+
+.toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+
+.toolbar__title {
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.toolbar__sub {
+  margin-left: 10px;
+  font-size: 13px;
+  font-weight: 400;
+  color: var(--el-text-color-secondary);
+}
+
+.toolbar__actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* ---------- 小工具 ---------- */
+.mono {
+  font-family: var(--mono-font);
+  font-size: 12.5px;
+}
+
+.text-secondary {
+  color: var(--el-text-color-secondary);
+}
+
+.text-small {
+  font-size: 12px;
+}
+
+.text-danger {
+  color: var(--el-color-danger);
+}
+
+.text-success {
+  color: var(--el-color-success);
+}
+
+.money {
+  font-variant-numeric: tabular-nums;
+  font-weight: 500;
+}
+
+.form-help {
+  margin-top: 4px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--el-text-color-secondary);
+}
+
+.ellipsis {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cell-stack {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  min-width: 0;
+  line-height: 1.5;
+}
+
+.cell-stack > * {
+  max-width: 100%;
+}
+
+.is-right .cell-stack {
+  align-items: flex-end;
+}
+
+.is-center .cell-stack {
+  align-items: center;
+}
+
+.el-table .el-button.is-link + .el-button.is-link {
+  margin-left: 10px;
+}
+
+.el-table th.el-table__cell {
+  background: #f8fafc !important;
+  color: #475569;
+  font-weight: 600;
+}
+
+.el-descriptions__label {
+  white-space: nowrap;
+}
+
+.el-drawer__header {
+  margin-bottom: 0;
+  padding-bottom: 16px;
+  border-bottom: 1px solid var(--el-border-color-lighter);
+}
+
+.el-drawer__footer {
+  border-top: 1px solid var(--el-border-color-lighter);
+  padding-top: 12px;
+}

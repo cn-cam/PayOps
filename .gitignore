@@ -1,0 +1,15 @@
+bin/
+obj/
+.vs/
+.idea/
+*.user
+artifacts/
+node_modules/
+web/admin/dist/
+src/PayOps.Server/wwwroot/
+
+# 本地密钥与环境文件
+deploy/compose/.env
+deploy/compose/.env.dev
+deploy/k8s/overlays/prod/secret.env
+appsettings.Production.json
