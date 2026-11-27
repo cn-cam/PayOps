@@ -227,23 +227,24 @@ public sealed class AdminQueryService(Db db, IPayProviderRegistry providers, IOp
     {
         days = Math.Clamp(days <= 0 ? 1 : days, 1, 90);
         var start = DayStartUtc(-(days - 1));
-        var (key, name, join) = dimension switch
+        // key 必须能由 groupBy 的列唯一确定（MySQL 默认开启 ONLY_FULL_GROUP_BY）
+        var (key, name, join, groupBy) = dimension switch
         {
-            "passage" => ("o.passage_id", "COALESCE(p.name, '未路由')", "LEFT JOIN pay_passage p ON p.id = o.passage_id"),
-            "provider" => ("o.provider", "o.provider", ""),
+            "passage" => ("CAST(o.passage_id AS CHAR)", "COALESCE(p.name, '未路由')", "LEFT JOIN pay_passage p ON p.id = o.passage_id", "o.passage_id"),
+            "provider" => ("o.provider", "o.provider", "", "o.provider"),
             // 按"应用 + 渠道编码"聚合：渠道被删除重建后 ID 会变，但编码代表的是同一个分发渠道
             _ => ("CONCAT(o.app_code, '/', o.channel_code)", "CONCAT(o.app_code, ' / ', COALESCE(c.name, o.channel_code))",
-                "LEFT JOIN pay_channel c ON c.app_id = o.app_id AND c.code = o.channel_code"),
+                "LEFT JOIN pay_channel c ON c.app_id = o.app_id AND c.code = o.channel_code", "o.app_code, o.channel_code"),
         };
         var rows = await db.QueryAsync<DistributionItem>(
             $"""
-             SELECT CAST({key} AS CHAR) AS `key`, MAX({name}) AS name,
+             SELECT {key} AS `key`, MAX({name}) AS name,
                     COUNT(*) AS order_count,
                     COALESCE(SUM(o.status = 1), 0) AS paid_count,
                     COALESCE(SUM(IF(o.status = 1, o.amount, 0)), 0) AS paid_amount
              FROM pay_order o {join}
              WHERE o.created_at >= @start
-             GROUP BY {key}
+             GROUP BY {groupBy}
              ORDER BY paid_amount DESC, order_count DESC
              LIMIT 50
              """, new { start });

@@ -15,7 +15,7 @@ resources:
 images:
   - name: payops
     newName: registry.example.com/payops/payops
-    newTag: 1.1.0
+    newTag: 1.1.1
 
 secretGenerator:
   - name: payops-secret

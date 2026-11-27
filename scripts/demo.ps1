@@ -245,6 +245,10 @@ $info = Admin GET "/system/info"
 $info.checks | ForEach-Object { Write-Host ("    {0,-9} ok={1} {2}" -f $_.name, $_.ok, $_.message) }
 $info.nodes | ForEach-Object { Write-Host ("    节点 {0}  角色={1}  节点号={2}" -f $_.instanceId, ($_.roles -join ","), $_.workerId) }
 Assert (($info.checks | Where-Object { -not $_.ok }).Count -eq 0) "MySQL / Redis / RabbitMQ 均正常，在线节点 $($info.nodes.Count) 个"
+# 仪表盘的每个统计接口都要能正常返回（聚合 SQL 在 ONLY_FULL_GROUP_BY 下容易写错）
+$dims = foreach ($d in "channel", "passage", "provider") { (Admin GET "/dashboard/distribution?dimension=$d&days=7").Count }
+$trend = Admin GET "/dashboard/trend?days=7"
+Assert ($trend.Count -eq 7 -and ($dims | Where-Object { $_ -lt 1 }).Count -eq 0) "仪表盘趋势与三种分布统计正常（渠道 $($dims[0]) / 通道 $($dims[1]) / 类型 $($dims[2]) 项）"
 $summary = Admin GET "/dashboard/summary"
 Write-Host ("    今日：订单 {0} 笔，成功 {1} 笔，成功金额 {2:N2} 元" -f $summary.today.orderCount, $summary.today.paidCount, ($summary.today.paidAmount / 100))
 
