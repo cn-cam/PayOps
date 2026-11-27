@@ -17,6 +17,7 @@ import {
   NOTIFY_STATUS,
   NOTIFY_TYPE,
   ORDER_STATUS,
+  ORDER_TYPE,
   REFUND_SOURCE,
   REFUND_STATUS,
   VERIFIED,
@@ -34,6 +35,8 @@ const emit = defineEmits<{
   'update:modelValue': [value: boolean]
   /** 订单发生了变更（同步 / 关闭 / 退款 / 模拟支付等），列表页可据此刷新 */
   changed: []
+  /** 点击了订单所属的订阅号，由宿主打开订阅详情 */
+  'open-subscription': [subNo: string]
 }>()
 
 const auth = useAuthStore()
@@ -245,6 +248,7 @@ function viewUpstream(row: UpstreamNotifyItem) {
         <span class="mono drawer-head__no">{{ orderNo }}</span>
         <el-button link type="primary" :icon="CopyDocument" @click="copyText(orderNo)" />
         <EnumTag v-if="order" :options="ORDER_STATUS" :value="order.status" effect="dark" />
+        <EnumTag v-if="order && order.orderType" :options="ORDER_TYPE" :value="order.orderType" effect="plain" />
       </div>
     </template>
 
@@ -321,6 +325,22 @@ function viewUpstream(row: UpstreamNotifyItem) {
           </el-descriptions-item>
           <el-descriptions-item label="订单状态">
             <EnumTag :options="ORDER_STATUS" :value="order.status" size="small" />
+          </el-descriptions-item>
+          <el-descriptions-item label="订单类型">
+            <EnumTag :options="ORDER_TYPE" :value="order.orderType ?? 0" size="small" effect="plain" />
+            <span v-if="order.orderType === 2" class="text-secondary text-small currency">由上游扣款事件生成</span>
+          </el-descriptions-item>
+          <el-descriptions-item label="订阅号">
+            <el-link
+              v-if="order.subNo"
+              type="primary"
+              underline="never"
+              class="mono"
+              @click="emit('open-subscription', order.subNo)"
+            >
+              {{ order.subNo }}
+            </el-link>
+            <span v-else>-</span>
           </el-descriptions-item>
           <el-descriptions-item label="应用">
             <span class="mono">{{ order.appCode }}</span>

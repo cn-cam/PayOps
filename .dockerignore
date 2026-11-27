@@ -11,4 +11,5 @@ deploy
 tests
 scripts
 **/appsettings.Development.json
+**/appsettings.Local.json
 **/*.user

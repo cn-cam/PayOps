@@ -156,12 +156,12 @@ public class ProviderTests
     // ---------------------------------------------------------------- 抖音
 
     [Fact]
-    public async Task Douyin_signatures_follow_documented_rules()
+    public async Task Douyin_mini_program_signatures_follow_documented_rules()
     {
         // 请求签名：值（不含 app_id / sign）+ SALT 排序后以 & 连接取 MD5
         var body = new Dictionary<string, object> { ["app_id"] = "tt1", ["out_order_no"] = "P1", ["total_amount"] = 600L, ["subject"] = "s", ["body"] = "b", ["valid_time"] = 1800L };
         var expected = KeyUtil.Md5Hex(string.Join('&', new[] { "P1", "600", "s", "b", "1800", "SALT" }.Order(StringComparer.Ordinal)));
-        Assert.Equal(expected, DouyinProvider.RequestSign(body, "SALT"));
+        Assert.Equal(expected, DouyinMpProvider.RequestSign(body, "SALT"));
 
         var config = Config(("appId", "tt1"), ("salt", "SALT"), ("token", "TOKEN"));
         var msg = JsonSerializer.Serialize(new { appid = "tt1", cp_orderno = "P1", total_amount = 600, status = "SUCCESS", order_id = "N7000", paid_at = 1795752000 });
@@ -170,7 +170,7 @@ public class ProviderTests
         var signature = Convert.ToHexStringLower(SHA1.HashData(Encoding.UTF8.GetBytes(string.Concat(sorted))));
         var callback = JsonSerializer.Serialize(new { timestamp = 1795752000, nonce = "797", msg, type = "payment", msg_signature = signature });
 
-        var provider = new DouyinProvider(Http);
+        var provider = new DouyinMpProvider(Http);
         var ok = await provider.ParseNotifyAsync(Notify(config, callback), default);
         var e = Assert.Single(ok.Events);
         Assert.Equal(("P1", "N7000", 600L), (e.OrderNo, e.UpstreamTradeNo, e.Amount));
@@ -380,7 +380,7 @@ public class ProviderTests
         var body = (string)credential.Data["body"]!;
 
         var e = Assert.Single((await provider.ParseNotifyAsync(Notify(config, body), default)).Events);
-        Assert.Equal(("P9", 600L), (e.OrderNo, e.Amount));
+        Assert.Equal((NotifyEventType.Paid, "P9", 600L), (e.Type, e.OrderNo, e.Amount));
         Assert.False((await provider.ParseNotifyAsync(Notify(config, body.Replace("600", "1")), default)).Verified);
         Assert.False((await provider.ParseNotifyAsync(Notify(Config(("secret", "other")), body), default)).Verified);
 
@@ -392,7 +392,7 @@ public class ProviderTests
     {
         IPayProvider[] all =
         [
-            new WechatProvider(Http), new AlipayProvider(Http), new DouyinProvider(Http), new HuaweiProvider(Http), new HonorProvider(Http),
+            new WechatProvider(Http), new AlipayProvider(Http), new DouyinProvider(Http), new DouyinMpProvider(Http), new HuaweiProvider(Http), new HonorProvider(Http),
             new OppoProvider(Http), new VivoProvider(Http), new XiaomiProvider(Http), new AppleProvider(Http), new MockProvider(Http),
         ];
         Assert.Equal(all.Length, all.Select(p => p.Meta.Code).Distinct().Count());

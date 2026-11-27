@@ -55,6 +55,7 @@ PowerShell 示例见 `scripts/demo.ps1` 的 `Gateway` 函数。
 | `returnUrl` | 否 | 支付宝网页支付完成后的跳转地址 |
 | `attach` | 否 | 透传数据（≤512），通知时原样返回 |
 | `expireSeconds` | 否 | 订单有效期，默认 1800 |
+| `subscribe` | 否 | `true` = 自动续费订阅的首购（仅华为 / 荣耀 / 苹果内购支持），见第 4 节 |
 
 | payMethod | 说明 | `credential.type` → 客户端用法 |
 | --- | --- | --- |
@@ -65,7 +66,10 @@ PowerShell 示例见 `scripts/demo.ps1` 的 `Gateway` 函数。
 | `alipay_app` | 支付宝 APP | `order_string` → 传给支付宝 SDK |
 | `alipay_wap` / `alipay_page` | 手机 / 电脑网站 | `redirect_url` |
 | `alipay_qr` | 当面付扫码 | `qr_code` |
-| `douyin_mp` | 抖音小程序担保支付 | `sdk_params` → `tt.pay({ orderInfo: { order_id, order_token } })` |
+| `douyin_app` | 抖音支付 APP | `app_params` → 传给抖音支付 OpenSDK（`package` 固定为 `Sign=DYPay`） |
+| `douyin_h5` | 抖音支付 H5 | `redirect_url` → 跳转 `url`（5 分钟内有效；发起页域名须为已配置的 H5 支付域名） |
+| `douyin_pc` | 抖音支付 PC 扫码（Native） | `qr_code` → `codeUrl` 生成二维码（**2 分钟内有效**，过期用相同参数重新下单即可刷新） |
+| `douyinmp_ecpay` | 抖音小程序担保支付 | `sdk_params` → `tt.pay({ orderInfo: { order_id, order_token } })` |
 | `huawei_iap` | 华为 IAP | `iap` → `productId` + `developerPayload` 传给 SDK |
 | `honor_iap` | 荣耀 IAP | `iap` → `productId` + `bizOrderNo` / `developerPayload` |
 | `apple_iap` | 苹果 IAP | `iap` → `productId` + `appAccountToken` 传给 `purchase(options:)` |
@@ -106,7 +110,29 @@ PowerShell 示例见 `scripts/demo.ps1` 的 `Gateway` 函数。
 
 订单 `status`：0 待支付，1 成功，2 关闭，3 失败。退款 `status`：0 处理中，1 成功，2 失败。
 
-## 4. 业务通知
+## 4. 自动续费订阅
+
+适用于应用商店的自动续费订阅型商品（华为、荣耀、苹果；模拟通道可用于联调）。模型：**一个订阅 = 一个订阅号 `subNo` + 每期一笔订单**。
+
+| 环节 | 做法 |
+| --- | --- |
+| 首购 | `POST /api/pay/orders` 带 `subscribe: true` 与 `productId` → 客户端在商店完成订阅 → `POST /api/pay/orders/verify` 提交凭证（华为需同时提交 `purchaseToken` 与 `subscriptionId`；苹果提交 `transactionId`）。入账后订单的 `orderType = 1`，并生成 `subNo` |
+| 续订 | 无需业务发起。商店每期扣款成功 → 系统自动生成一笔 `orderType = 2` 的续费单并顺延周期 → 业务收到一条普通的支付通知（带 `subNo` 与 `subscription`） |
+| 退订 | 用户在商店侧退订 → 系统经商店通知同步 → 业务收到 `type = "subscription"`、`event = "canceled"`。也可调用 `POST /api/pay/subscriptions/cancel`（华为、荣耀支持服务端退订；苹果不提供此能力，会返回 `NOT_SUPPORTED` 并提示引导用户到系统订阅管理页） |
+| 恢复续订 / 到期 / 撤销 | 均由商店通知或到期巡检驱动，业务收到 `event = resumed / expired / revoked` |
+
+退订只是停止后续续订，**当前已付费周期内订阅仍然有效**（`status = 1`、`autoRenew = false`），到期后才变为 `status = 2`。
+
+| 接口 | 说明 |
+| --- | --- |
+| `GET /api/pay/subscriptions?subNo=…`（或 `?orderNo=` / `?mchOrderNo=` 用首购单定位），可加 `&sync=true` | 查询订阅；`sync=true` 时向商店查询并同步最新状态 |
+| `POST /api/pay/subscriptions/cancel` `{ subNo \| orderNo \| mchOrderNo }` | 服务端退订，幂等 |
+
+订阅对象：`{ subNo, channel, provider, productId, userId, status, autoRenew, amount, periodStart, expiresAt, cancelAt, renewCount, firstOrderNo, lastOrderNo, attach, createdAt }`。`status`：1 生效中，2 已过期，3 已撤销（退款/撤回）。
+
+业务侧建议：以 `expiresAt` 作为权益到期时间；每收到一笔 `orderType` 为 1 或 2 的支付通知就把权益延长到通知里的 `subscription.expiresAt`；收到 `expired` / `revoked` 时回收权益。
+
+## 5. 业务通知
 
 支付成功、退款成功/失败时，PayOps 向业务通知地址 `POST` JSON，并带与请求相同算法的签名头（`METHOD=POST`，路径为通知地址的路径与查询串）。
 
@@ -121,6 +147,9 @@ PowerShell 示例见 `scripts/demo.ps1` 的 `Gateway` 函数。
   "payMethod": "wechat_app",
   "amount": 600,
   "currency": "CNY",
+  "orderType": 0,
+  "subNo": "",
+  "subscription": null,
   "status": 1,
   "upstreamTradeNo": "4200001234202611270000000001",
   "userId": "u1001",
@@ -130,19 +159,23 @@ PowerShell 示例见 `scripts/demo.ps1` 的 `Gateway` 函数。
 }
 ```
 
+订阅的首购单与续费单也走这条支付通知：`orderType` 为 1 或 2，`subNo` 为订阅号，`subscription` 为 `{ subNo, status, autoRenew, periodStart, expiresAt, renewCount }`。续费单的 `mchOrderNo` 由系统生成（`RENEW-` + 上游交易号）。
+
 退款通知 `type = "refund"`，包含 `refundNo / mchRefundNo / refundAmount / refundStatus / source / reason / errorMsg / refundedAt`。`source = "upstream"` 表示用户在应用商店侧发起的退款（业务侧应回收权益）。
+
+订阅状态变更通知 `type = "subscription"`，`event` 为 `canceled`（退订）/ `resumed`（恢复续订）/ `expired`（到期）/ `revoked`（撤销），并带订阅对象的全部字段。
 
 接收方要求：
 
 1. **验签**后再处理（参考 `DemoMerchantController`）；
 2. 处理成功返回 HTTP 2xx 且响应体为 `success`；否则按 15s / 30s / 1m / 3m / 10m / 30m / 1h / 2h / 6h 重试；
-3. **按 `orderNo` / `refundNo` 幂等**——通知语义为"至少一次"，可能重复。
+3. **按 `orderNo` / `refundNo` 幂等**（订阅事件按 `subNo + event + 订阅当前状态` 判断）——通知语义为"至少一次"，可能重复。
 
 ### MQ 事件（可选）
 
-内部系统也可以直接订阅 RabbitMQ：交换机 `payops.events`（topic），路由键 `pay.success` / `refund.success` / `refund.failed`，消息体与 HTTP 通知一致。自行声明队列并绑定即可。
+内部系统也可以直接订阅 RabbitMQ：交换机 `payops.events`（topic），路由键 `pay.success` / `refund.success` / `refund.failed` / `subscription.canceled` / `subscription.resumed` / `subscription.expired` / `subscription.revoked`，消息体与 HTTP 通知一致。自行声明队列并绑定即可。
 
-## 5. 错误码
+## 6. 错误码
 
 | errorCode | 含义 |
 | --- | --- |
@@ -154,5 +187,5 @@ PowerShell 示例见 `scripts/demo.ps1` 的 `Gateway` 函数。
 | `ORDER_NOT_FOUND` / `ORDER_EXISTS` / `ORDER_PAID` / `ORDER_STATE_ERROR` | 订单类 |
 | `REFUND_NOT_FOUND` / `REFUND_EXCEEDED` / `CONFLICT` | 退款类 |
 | `RECEIPT_INVALID` | 内购凭证无效 / 不属于该订单 / 已被使用 |
-| `NOT_SUPPORTED` | 该支付类型不支持此操作（如商店内购不支持接口退款） |
+| `NOT_SUPPORTED` | 该支付类型不支持此操作（如商店内购不支持接口退款、苹果不支持服务端退订、非内购类型不支持订阅） |
 | `SYSTEM_BUSY` / `INTERNAL_ERROR` | 可重试 |

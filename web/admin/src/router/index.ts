@@ -69,10 +69,22 @@ const routes: RouteRecordRaw[] = [
         meta: { title: '测试下单', roles: ['admin', 'operator'] },
       },
       {
+        path: 'subscriptions',
+        name: 'subscriptions',
+        component: () => import('@/views/subscriptions/SubscriptionsView.vue'),
+        meta: { title: '订阅管理' },
+      },
+      {
         path: 'refunds',
         name: 'refunds',
         component: () => import('@/views/refunds/RefundsView.vue'),
         meta: { title: '退款管理' },
+      },
+      {
+        path: 'recon',
+        name: 'recon',
+        component: () => import('@/views/recon/ReconView.vue'),
+        meta: { title: '对账管理' },
       },
       {
         path: 'notify-tasks',

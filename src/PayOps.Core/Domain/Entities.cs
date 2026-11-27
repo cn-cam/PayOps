@@ -6,7 +6,18 @@ public enum RefundStatus { Processing = 0, Success = 1, Failed = 2 }
 
 public enum NotifyStatus { Pending = 0, Success = 1, Failed = 2 }
 
-public enum NotifyType { Pay = 1, Refund = 2 }
+public enum NotifyType { Pay = 1, Refund = 2, Subscription = 3 }
+
+/// <summary>订单类型：一次性支付、订阅首购、订阅续费（续费单由上游扣款事件生成，生来即为已支付）。</summary>
+public enum OrderType { OneTime = 0, SubscriptionInitial = 1, SubscriptionRenewal = 2 }
+
+public enum SubscriptionStatus { Active = 1, Expired = 2, Revoked = 3 }
+
+public enum ReconStatus { Pending = 0, Balanced = 1, HasDiff = 2, Failed = 3 }
+
+public enum ReconBizType { Pay = 1, Refund = 2 }
+
+public enum ReconDiffType { UpstreamOnly = 1, LocalOnly = 2, AmountMismatch = 3 }
 
 public static class Roles
 {
@@ -92,6 +103,8 @@ public class PayOrder
     public long BindingId { get; set; }
     public string Provider { get; set; } = "";
     public string PayMethod { get; set; } = "";
+    public OrderType OrderType { get; set; }
+    public string SubNo { get; set; } = "";
     public string Subject { get; set; } = "";
     public string Body { get; set; } = "";
     public long Amount { get; set; }
@@ -142,6 +155,85 @@ public class PayRefund
     public int CheckCount { get; set; }
     public DateTime CreatedAt { get; set; }
     public DateTime UpdatedAt { get; set; }
+}
+
+/// <summary>自动续费订阅：每个扣款周期对应一笔 <see cref="PayOrder"/>（首购或续费）。</summary>
+public class PaySubscription
+{
+    public long Id { get; set; }
+    public string SubNo { get; set; } = "";
+    public long AppId { get; set; }
+    public string AppCode { get; set; } = "";
+    public long ChannelId { get; set; }
+    public string ChannelCode { get; set; } = "";
+    public long PassageId { get; set; }
+    public string Provider { get; set; } = "";
+    public string ProductId { get; set; } = "";
+    public string UserId { get; set; } = "";
+    public string UpstreamSubId { get; set; } = "";
+    public string UpstreamToken { get; set; } = "";
+    public SubscriptionStatus Status { get; set; } = SubscriptionStatus.Active;
+    public bool AutoRenew { get; set; } = true;
+    public long Amount { get; set; }
+    public DateTime? PeriodStart { get; set; }
+    public DateTime? ExpiresAt { get; set; }
+    public DateTime? CancelAt { get; set; }
+    public int RenewCount { get; set; }
+    public string FirstOrderNo { get; set; } = "";
+    public string LastOrderNo { get; set; } = "";
+    public string NotifyUrl { get; set; } = "";
+    public string Attach { get; set; } = "";
+    public DateTime? NextCheckAt { get; set; }
+    public int CheckCount { get; set; }
+    public DateTime CreatedAt { get; set; }
+    public DateTime UpdatedAt { get; set; }
+}
+
+/// <summary>对账批次：每个通道每个账单日一条。</summary>
+public class PayReconBatch
+{
+    public long Id { get; set; }
+    public long PassageId { get; set; }
+    public string Provider { get; set; } = "";
+    public string BillDate { get; set; } = "";
+    public ReconStatus Status { get; set; }
+    public int UpstreamPayCount { get; set; }
+    public long UpstreamPayAmount { get; set; }
+    public int UpstreamRefundCount { get; set; }
+    public long UpstreamRefundAmount { get; set; }
+    public int LocalPayCount { get; set; }
+    public long LocalPayAmount { get; set; }
+    public int LocalRefundCount { get; set; }
+    public long LocalRefundAmount { get; set; }
+    public int DiffCount { get; set; }
+    public string ErrorMsg { get; set; } = "";
+    public int Attempts { get; set; }
+    public DateTime? NextRunAt { get; set; }
+    public DateTime? FinishedAt { get; set; }
+    public DateTime CreatedAt { get; set; }
+    public DateTime UpdatedAt { get; set; }
+}
+
+public class PayReconDiff
+{
+    public long Id { get; set; }
+    public long BatchId { get; set; }
+    public long PassageId { get; set; }
+    public string Provider { get; set; } = "";
+    public string BillDate { get; set; } = "";
+    public ReconBizType BizType { get; set; }
+    public ReconDiffType DiffType { get; set; }
+    public string OrderNo { get; set; } = "";
+    public string RefundNo { get; set; } = "";
+    public string UpstreamTradeNo { get; set; } = "";
+    public long? LocalAmount { get; set; }
+    public long? UpstreamAmount { get; set; }
+    public string LocalStatus { get; set; } = "";
+    public int Status { get; set; }
+    public string Remark { get; set; } = "";
+    public string HandledBy { get; set; } = "";
+    public DateTime? HandledAt { get; set; }
+    public DateTime CreatedAt { get; set; }
 }
 
 /// <summary>业务通知任务，同时充当事务发件箱。</summary>

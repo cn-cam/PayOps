@@ -48,6 +48,15 @@ public abstract class PayProviderBase(IHttpClientFactory httpFactory) : IPayProv
     public virtual Task<QueryResult> VerifyReceiptAsync(ReceiptContext ctx, CancellationToken ct) =>
         throw new ProviderException("NOT_SUPPORTED", $"{Meta.Name}不需要凭证核验，支付结果以服务端回调为准", requestFault: true);
 
+    public virtual Task<SubscriptionState> QuerySubscriptionAsync(SubscriptionContext ctx, CancellationToken ct) =>
+        Task.FromResult(new SubscriptionState { Known = false, Message = "该通道不支持主动查询订阅状态" });
+
+    public virtual Task CancelSubscriptionAsync(SubscriptionContext ctx, CancellationToken ct) =>
+        throw new ProviderException("NOT_SUPPORTED", $"{Meta.Name}不支持服务端退订，请引导用户在对应商店的订阅管理页退订，退订结果会经通知同步", requestFault: true);
+
+    public virtual Task<List<BillItem>> DownloadBillAsync(BillContext ctx, CancellationToken ct) =>
+        throw new ProviderException("NOT_SUPPORTED", $"{Meta.Name}不支持下载对账单", requestFault: true);
+
     public abstract Task<NotifyParseResult> ParseNotifyAsync(NotifyContext ctx, CancellationToken ct);
 
     public virtual NotifyReply BuildReply(NotifyOutcome outcome, string message) =>
@@ -215,6 +224,86 @@ public static class TimeUtil
     public static DateTime FromUnixSeconds(long s) => DateTimeOffset.FromUnixTimeSeconds(s).UtcDateTime;
 }
 
+/// <summary>对账单 CSV 的宽松解析：按表头名取列，容忍反引号/制表符前缀与带引号的字段。</summary>
+public static class BillCsv
+{
+    public static List<string> SplitLine(string line)
+    {
+        var fields = new List<string>();
+        var sb = new StringBuilder();
+        var quoted = false;
+        for (var i = 0; i < line.Length; i++)
+        {
+            var c = line[i];
+            if (quoted)
+            {
+                if (c == '"' && i + 1 < line.Length && line[i + 1] == '"') { sb.Append('"'); i++; }
+                else if (c == '"') quoted = false;
+                else sb.Append(c);
+            }
+            else if (c == '"') quoted = true;
+            else if (c == ',') { fields.Add(Clean(sb.ToString())); sb.Clear(); }
+            else sb.Append(c);
+        }
+        fields.Add(Clean(sb.ToString()));
+        return fields;
+    }
+
+    /// <summary>去掉首尾空白以及各家用来防止 Excel 科学计数的前缀字符（` 与制表符）。</summary>
+    public static string Clean(string value) => value.Trim().TrimStart('`', '\t', '\uFEFF').Trim();
+
+    /// <summary>
+    /// 找到包含全部 requiredHeaders 的表头行，之后的每一行解析为 列名→值。
+    /// 明细区在以下任一情况结束：首列等于 stopFirstField（汇总区表头）、或该行列数少于表头。
+    /// </summary>
+    public static IEnumerable<Dictionary<string, string>> Rows(string text, string[] requiredHeaders, string? stopFirstField = null)
+    {
+        List<string>? headers = null;
+        foreach (var raw in text.Split('\n'))
+        {
+            var line = raw.TrimEnd('\r');
+            if (line.Trim().Length == 0) continue;
+            var fields = SplitLine(line);
+            if (headers is null)
+            {
+                if (requiredHeaders.All(h => fields.Contains(h))) headers = fields;
+                continue;
+            }
+            if (stopFirstField is not null && fields[0] == stopFirstField) yield break;
+            if (fields.Count < headers.Count) yield break;
+            var row = new Dictionary<string, string>(headers.Count);
+            for (var i = 0; i < headers.Count; i++) row[headers[i]] = fields[i];
+            yield return row;
+        }
+    }
+
+    /// <summary>账单文本解码：优先严格 UTF-8，失败则按 GBK（各家账单编码并不统一）。</summary>
+    public static string Decode(byte[] bytes)
+    {
+        try
+        {
+            return new UTF8Encoding(false, throwOnInvalidBytes: true).GetString(bytes);
+        }
+        catch (DecoderFallbackException)
+        {
+            Encoding.RegisterProvider(CodePagesEncodingProvider.Instance);
+            return Encoding.GetEncoding(936).GetString(bytes);
+        }
+    }
+
+    /// <summary>若为 gzip 流则解压，否则原样返回。</summary>
+    public static byte[] Gunzip(byte[] bytes)
+    {
+        if (bytes.Length < 2 || bytes[0] != 0x1f || bytes[1] != 0x8b) return bytes;
+        using var input = new System.IO.Compression.GZipStream(new MemoryStream(bytes), System.IO.Compression.CompressionMode.Decompress);
+        using var output = new MemoryStream();
+        input.CopyTo(output);
+        return output.ToArray();
+    }
+
+    /// <summary>元（可能不带小数或带任意位小数）→ 分。</summary>
+    public static long Fen(string yuan) => Money.FromYuan(yuan.Length == 0 ? "0" : yuan) ?? 0;
+}
 public static class Money
 {
     /// <summary>分 → "0.00" 元。</summary>

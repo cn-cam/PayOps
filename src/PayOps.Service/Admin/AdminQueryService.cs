@@ -9,7 +9,7 @@ namespace PayOps.Service.Admin;
 public sealed class AdminQueryService(Db db, IPayProviderRegistry providers, IOptions<PayOpsOptions> options)
 {
     private const string OrderSelect =
-        "o.id, o.order_no, o.mch_order_no, o.app_id, o.app_code, o.channel_id, o.channel_code, o.passage_id, p.name AS passage_name, o.provider, o.pay_method, o.subject, o.amount, o.refund_amount, o.currency, o.status, o.upstream_trade_no, o.user_id, o.created_at, o.paid_at, o.expire_at";
+        "o.id, o.order_no, o.mch_order_no, o.app_id, o.app_code, o.channel_id, o.channel_code, o.passage_id, p.name AS passage_name, o.provider, o.pay_method, o.order_type, o.sub_no, o.subject, o.amount, o.refund_amount, o.currency, o.status, o.upstream_trade_no, o.user_id, o.created_at, o.paid_at, o.expire_at";
 
     private const string OrderDetailSelect = OrderSelect +
         ", o.body, o.product_id, o.client_ip, o.buyer_id, o.notify_url, o.return_url, o.attach, o.credential, o.error_code, o.error_msg, o.closed_at, o.check_count, o.next_check_at, o.updated_at, o.binding_id";
@@ -39,6 +39,8 @@ public sealed class AdminQueryService(Db db, IPayProviderRegistry providers, IOp
             .Add("o.passage_id = {0}", q.PassageId)
             .Add("o.provider = {0}", q.Provider)
             .Add("o.status = {0}", q.Status)
+            .Add("o.order_type = {0}", q.OrderType)
+            .Add("o.sub_no = {0}", q.SubNo)
             .Add("o.user_id = {0}", q.UserId)
             .Add("o.created_at >= {0}", q.StartUtc)
             .Add("o.created_at < {0}", q.EndUtc);
@@ -95,6 +97,72 @@ public sealed class AdminQueryService(Db db, IPayProviderRegistry providers, IOp
         return db.PageAsync<UpstreamNotifyItem>(UpstreamSelect, "pay_upstream_notify", where, "id DESC", q.Page, q.PageSize);
     }
 
+    // ------------------------------------------------------------------ 订阅
+
+    private const string SubscriptionSelect =
+        "s.id, s.sub_no, s.app_id, s.app_code, s.channel_code, s.passage_id, p.name AS passage_name, s.provider, s.product_id, s.user_id, s.upstream_sub_id, s.status, s.auto_renew, s.amount, s.period_start, s.expires_at, s.cancel_at, s.renew_count, s.first_order_no, s.last_order_no, s.created_at, s.updated_at";
+
+    private const string SubscriptionFrom = "pay_subscription s LEFT JOIN pay_passage p ON p.id = s.passage_id";
+
+    public Task<PageResult<SubscriptionItem>> ListSubscriptionsAsync(SubscriptionQuery q)
+    {
+        var where = new SqlWhere()
+            .Add("s.sub_no = {0}", q.SubNo)
+            .Add("s.app_id = {0}", q.AppId)
+            .Add("s.provider = {0}", q.Provider)
+            .Add("s.status = {0}", q.Status)
+            .Add("s.auto_renew = {0}", q.AutoRenew)
+            .Add("s.user_id = {0}", q.UserId)
+            .Add("s.product_id = {0}", q.ProductId)
+            .Add("s.created_at >= {0}", q.StartUtc)
+            .Add("s.created_at < {0}", q.EndUtc);
+        return db.PageAsync<SubscriptionItem>(SubscriptionSelect, SubscriptionFrom, where, "s.id DESC", q.Page, q.PageSize);
+    }
+
+    public async Task<SubscriptionDetail> GetSubscriptionAsync(string subNo)
+    {
+        var detail = await db.FirstOrDefaultAsync<SubscriptionDetail>(
+                         $"SELECT {SubscriptionSelect}, s.notify_url, s.attach, s.next_check_at, s.check_count FROM {SubscriptionFrom} WHERE s.sub_no = @subNo", new { subNo })
+                     ?? throw new PayException(ErrorCodes.NotFound, "订阅不存在");
+        detail.Orders = await db.QueryAsync<OrderItem>($"SELECT {OrderSelect} FROM {OrderFrom} WHERE o.sub_no = @subNo ORDER BY o.id DESC LIMIT 200", new { subNo });
+        detail.NotifyTasks = await db.QueryAsync<NotifyTaskItem>(
+            $"SELECT {NotifyTaskSelect} FROM pay_notify_task WHERE type = 3 AND biz_no LIKE @prefix ORDER BY id DESC LIMIT 100", new { prefix = subNo + "-%" });
+        return detail;
+    }
+
+    // ------------------------------------------------------------------ 对账
+
+    public async Task<PageResult<ReconBatchItem>> ListReconBatchesAsync(ReconBatchQuery q)
+    {
+        var where = new SqlWhere()
+            .Add("b.passage_id = {0}", q.PassageId)
+            .Add("b.provider = {0}", q.Provider)
+            .Add("b.status = {0}", q.Status)
+            .Add("b.bill_date >= {0}", q.StartDate)
+            .Add("b.bill_date <= {0}", q.EndDate);
+        var page = await db.PageAsync<ReconBatchItem>(
+            "b.*, p.name AS passage_name, (SELECT COUNT(*) FROM pay_recon_diff d WHERE d.batch_id = b.id AND d.status = 0) AS open_diff_count",
+            "pay_recon_batch b LEFT JOIN pay_passage p ON p.id = b.passage_id", where, "b.bill_date DESC, b.id DESC", q.Page, q.PageSize);
+        foreach (var item in page.Items) item.ProviderName = providers.Find(item.Provider)?.Meta.Name ?? item.Provider;
+        return page;
+    }
+
+    public Task<PageResult<ReconDiffItem>> ListReconDiffsAsync(ReconDiffQuery q)
+    {
+        var where = new SqlWhere()
+            .Add("d.batch_id = {0}", q.BatchId)
+            .Add("d.passage_id = {0}", q.PassageId)
+            .Add("d.provider = {0}", q.Provider)
+            .Add("d.status = {0}", q.Status)
+            .Add("d.diff_type = {0}", q.DiffType)
+            .Add("d.biz_type = {0}", q.BizType)
+            .Add("d.order_no = {0}", q.OrderNo)
+            .Add("d.bill_date >= {0}", q.StartDate)
+            .Add("d.bill_date <= {0}", q.EndDate);
+        return db.PageAsync<ReconDiffItem>(
+            "d.*, p.name AS passage_name", "pay_recon_diff d LEFT JOIN pay_passage p ON p.id = d.passage_id", where, "d.id DESC", q.Page, q.PageSize);
+    }
+
     // ------------------------------------------------------------------ 仪表盘
 
     /// <summary>业务时区某天 0 点对应的 UTC 时间；dayOffset=0 为今天。</summary>
@@ -114,6 +182,8 @@ public sealed class AdminQueryService(Db db, IPayProviderRegistry providers, IOp
             PendingNotify = await db.ScalarAsync<long>("SELECT COUNT(*) FROM pay_notify_task WHERE status = 0"),
             FailedNotify = await db.ScalarAsync<long>("SELECT COUNT(*) FROM pay_notify_task WHERE status = 2"),
             ProcessingRefund = await db.ScalarAsync<long>("SELECT COUNT(*) FROM pay_refund WHERE status = 0"),
+            ActiveSubscriptions = await db.ScalarAsync<long>("SELECT COUNT(*) FROM pay_subscription WHERE status = 1"),
+            OpenReconDiffs = await db.ScalarAsync<long>("SELECT COUNT(*) FROM pay_recon_diff WHERE status = 0"),
         };
     }
 
@@ -161,7 +231,9 @@ public sealed class AdminQueryService(Db db, IPayProviderRegistry providers, IOp
         {
             "passage" => ("o.passage_id", "COALESCE(p.name, '未路由')", "LEFT JOIN pay_passage p ON p.id = o.passage_id"),
             "provider" => ("o.provider", "o.provider", ""),
-            _ => ("o.channel_id", "CONCAT(o.app_code, ' / ', COALESCE(c.name, o.channel_code))", "LEFT JOIN pay_channel c ON c.id = o.channel_id"),
+            // 按"应用 + 渠道编码"聚合：渠道被删除重建后 ID 会变，但编码代表的是同一个分发渠道
+            _ => ("CONCAT(o.app_code, '/', o.channel_code)", "CONCAT(o.app_code, ' / ', COALESCE(c.name, o.channel_code))",
+                "LEFT JOIN pay_channel c ON c.app_id = o.app_id AND c.code = o.channel_code"),
         };
         var rows = await db.QueryAsync<DistributionItem>(
             $"""

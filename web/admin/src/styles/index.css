@@ -147,6 +147,76 @@ a {
   align-items: center;
 }
 
+.cell-stack--tight {
+  gap: 3px;
+}
+
+.text-warning {
+  color: var(--el-color-warning);
+}
+
+/* ---------- 订阅到期提示 ---------- */
+.expiry--soon {
+  color: var(--el-color-warning);
+  font-weight: 600;
+}
+
+.expiry--expired {
+  color: var(--el-color-danger);
+  font-weight: 600;
+}
+
+.expiry--ended {
+  color: var(--el-text-color-secondary);
+}
+
+/* ---------- 流程说明条（订阅、对账等页面顶部的图解） ---------- */
+.flow-steps {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.flow-steps__step {
+  display: flex;
+  gap: 10px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: #f8fafc;
+}
+
+.flow-steps__no {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: var(--el-color-primary);
+  color: #fff;
+  font-size: 12px;
+  font-weight: 700;
+  flex-shrink: 0;
+}
+
+.flow-steps__title {
+  font-weight: 600;
+  line-height: 22px;
+}
+
+.flow-steps__desc {
+  margin-top: 2px;
+  color: var(--el-text-color-secondary);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+@media (max-width: 1440px) {
+  .flow-steps {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
 .el-table .el-button.is-link + .el-button.is-link {
   margin-left: 10px;
 }

@@ -23,7 +23,13 @@
 | 订单 `OrderStatus` | `0` 待支付，`1` 支付成功，`2` 已关闭，`3` 支付失败 |
 | 退款 `RefundStatus` | `0` 处理中，`1` 退款成功，`2` 退款失败 |
 | 通知 `NotifyStatus` | `0` 待通知，`1` 通知成功，`2` 通知失败（重试耗尽） |
-| 通知类型 `NotifyType` | `1` 支付，`2` 退款 |
+| 通知类型 `NotifyType` | `1` 支付，`2` 退款，`3` 订阅状态变更 |
+| 订单类型 `OrderType` | `0` 一次性支付，`1` 订阅首购，`2` 订阅续费（由上游扣款事件生成，生来已支付） |
+| 订阅 `SubscriptionStatus` | `1` 生效中，`2` 已过期，`3` 已撤销（退款/撤回）；另有布尔 `autoRenew`：`false` 表示已退订，当前周期结束后失效 |
+| 对账批次 `ReconStatus` | `0` 待执行，`1` 已平账，`2` 有差异，`3` 失败 |
+| 对账业务类型 `bizType` | `1` 支付，`2` 退款 |
+| 对账差异类型 `diffType` | `1` 上游有本地无（或本地未成功），`2` 本地有上游无，`3` 金额不一致 |
+| 差异处理 `status` | `0` 待处理，`1` 已处理 |
 | 角色 | `admin` / `operator` / `viewer` |
 
 ## 2. 认证
@@ -45,7 +51,7 @@
     "name": "微信支付",
     "category": "direct",
     "methods": [{ "code": "wechat_app", "name": "微信APP支付" }],
-    "capabilities": { "query": true, "close": true, "refund": true, "receiptVerify": false, "serverNotify": true },
+    "capabilities": { "query": true, "close": true, "refund": true, "receiptVerify": false, "serverNotify": true, "subscription": false, "subscriptionCancel": false, "bill": true },
     "configFields": [
       {
         "key": "appId", "label": "AppID", "type": "text",
@@ -60,6 +66,7 @@
 ```
 
 - `category`：`direct`（直连支付：微信/支付宝/抖音）、`store`（应用商店内购）、`mock`（演示）。
+- `capabilities.subscription`：支持自动续费订阅；`subscriptionCancel`：支持服务端退订（否则只能用户在商店侧退订）；`bill`：支持下载对账单（可对账）。
 - `configFields[].type`：`text` | `password` | `textarea` | `number` | `switch` | `select`。`switch` 的值为字符串 `"true"` / `"false"`。所有配置值都以字符串传输。
 - `secret = true` 的字段在详情接口中返回 `"******"`；更新时原样回传 `"******"` 或空串表示保持不变。
 
@@ -67,7 +74,7 @@
 
 | 方法 | 路径 | 出参 `data` |
 | --- | --- | --- |
-| GET | `/dashboard/summary` | `{ today: Stat, yesterday: Stat, pendingNotify, failedNotify, processingRefund }`，`Stat = { orderCount, paidCount, paidAmount, refundAmount, successRate }`（`successRate` 0~1） |
+| GET | `/dashboard/summary` | `{ today: Stat, yesterday: Stat, pendingNotify, failedNotify, processingRefund, activeSubscriptions, openReconDiffs }`，`Stat = { orderCount, paidCount, paidAmount, refundAmount, successRate }`（`successRate` 0~1） |
 | GET | `/dashboard/trend?days=7` | `[{ date: "2026-11-27", orderCount, paidCount, paidAmount }]`（升序，日期按业务时区） |
 | GET | `/dashboard/distribution?dimension=channel\|passage\|provider&days=1` | `[{ key, name, orderCount, paidCount, paidAmount, successRate }]` |
 | GET | `/system/info` | `{ version, instanceId, roles: [], workerId, startedAt, checks: [{ name, ok, message }], nodes: [{ instanceId, host, roles: [], workerId, version, startedAt, lastSeen }] }` |
@@ -162,19 +169,19 @@ RouteSimulateResult = {
 
 | 方法 | 路径 | 入参 | 出参 `data` |
 | --- | --- | --- | --- |
-| GET | `/orders?page&pageSize&orderNo&mchOrderNo&upstreamTradeNo&appId&channelId&passageId&provider&status&userId&startTime&endTime` | - | 分页 `OrderItem` |
+| GET | `/orders?page&pageSize&orderNo&mchOrderNo&upstreamTradeNo&appId&channelId&passageId&provider&status&orderType&subNo&userId&startTime&endTime` | - | 分页 `OrderItem` |
 | GET | `/orders/{orderNo}` | - | `OrderDetail` |
 | POST | `/orders/{orderNo}/sync` | - | `{ status, changed, message }`（主动查询上游并同步，即"补单"） |
 | POST | `/orders/{orderNo}/close` | - | `null` |
 | POST | `/orders/{orderNo}/refund` | `{ amount, reason }` | `{ refundNo, status }` |
 | POST | `/orders/{orderNo}/renotify` | - | `null`（重新通知业务方） |
 | POST | `/orders/{orderNo}/mock-pay` | - | `null`（仅 mock 通道订单，模拟上游支付成功回调） |
-| POST | `/orders/test` | `{ appId, channelCode, payMethod, amount, subject, productId, openId, userId }` | `TestOrderResult`（后台测试下单） |
+| POST | `/orders/test` | `{ appId, channelCode, payMethod, amount, subject, productId, openId, userId, subscribe }` | `TestOrderResult`（后台测试下单；`subscribe=true` 为订阅首购，仅 `capabilities.subscription` 的类型可用） |
 
 ```text
 OrderItem = {
   id, orderNo, mchOrderNo, appId, appCode, channelId, channelCode,
-  passageId, passageName, provider, payMethod, subject,
+  passageId, passageName, provider, payMethod, orderType, subNo, subject,
   amount, refundAmount, currency, status, upstreamTradeNo, userId,
   createdAt, paidAt, expireAt
 }
@@ -189,7 +196,7 @@ OrderDetail = OrderItem + {
 }
 
 TestOrderResult = {
-  orderNo, mchOrderNo, status, amount, provider, payMethod, passageId, passageName, expireAt,
+  orderNo, mchOrderNo, status, amount, provider, payMethod, orderType, passageId, passageName, expireAt,
   credential: { type: string, data: object }
 }
 ```
@@ -230,3 +237,59 @@ TestOrderResult = {
 | GET | `/audit-logs?page&pageSize&username&action&startTime&endTime` | - | 分页 `[{ id, userId, username, action, target, detail, ip, createdAt }]` |
 
 用户管理接口仅 `admin` 可用。
+
+## 14. 订阅（自动续费）
+
+| 方法 | 路径 | 入参 | 出参 `data` |
+| --- | --- | --- | --- |
+| GET | `/subscriptions?page&pageSize&subNo&appId&provider&status&autoRenew&userId&productId&startTime&endTime` | - | 分页 `SubscriptionItem`（`autoRenew` 传 `true`/`false`；时间按创建时间筛选） |
+| GET | `/subscriptions/{subNo}` | - | `SubscriptionDetail` |
+| POST | `/subscriptions/{subNo}/sync` | - | `{ status, changed, message }`（向商店查询并同步：补记续费、同步续订开关、确认过期/撤销） |
+| POST | `/subscriptions/{subNo}/cancel` | - | `null`（服务端退订；类型不支持时返回业务错误并提示引导用户到商店退订） |
+| POST | `/subscriptions/{subNo}/mock-event` | `{ event }` | `null`（仅 mock 通道。`event`：`renew` 续费一期 / `cancel` 退订 / `resume` 恢复续订 / `expire` 到期 / `revoke` 撤销） |
+
+```text
+SubscriptionItem = {
+  id, subNo, appId, appCode, channelCode, passageId, passageName, provider,
+  productId, userId, upstreamSubId, status, autoRenew, amount,
+  periodStart, expiresAt, cancelAt, renewCount, firstOrderNo, lastOrderNo, createdAt, updatedAt
+}
+
+SubscriptionDetail = SubscriptionItem + {
+  notifyUrl, attach, nextCheckAt, checkCount,
+  orders: OrderItem[],            // 首购单 + 各期续费单，按时间倒序
+  notifyTasks: NotifyTaskItem[]   // 订阅状态变更通知（type=3）
+}
+```
+
+## 15. 对账
+
+每个"通道 × 账单日"一个批次。系统每天（默认业务时区 10 点后）自动为支持账单的通道生成昨日批次并执行；也可手动发起或重跑。
+
+| 方法 | 路径 | 入参 | 出参 `data` |
+| --- | --- | --- | --- |
+| GET | `/recon/batches?page&pageSize&passageId&provider&status&startDate&endDate` | - | 分页 `ReconBatchItem`（`startDate`/`endDate` 为 `yyyy-MM-dd`，按账单日筛选，闭区间） |
+| POST | `/recon/batches` | `{ passageId, billDate }` | `{ id }`（手动发起；已存在则重置并重跑。`billDate` 为 `yyyy-MM-dd`，必须早于今天） |
+| POST | `/recon/batches/{id}/rerun` | - | `null` |
+| GET | `/recon/diffs?page&pageSize&batchId&passageId&status&diffType&bizType&orderNo&startDate&endDate` | - | 分页 `ReconDiffItem` |
+| POST | `/recon/diffs/{id}/handle` | `{ remark }` | `null`（标记为已处理，`remark` 必填） |
+
+```text
+ReconBatchItem = {
+  id, passageId, passageName, provider, providerName, billDate, status,
+  upstreamPayCount, upstreamPayAmount, upstreamRefundCount, upstreamRefundAmount,
+  localPayCount, localPayAmount, localRefundCount, localRefundAmount,
+  diffCount, openDiffCount,       // 差异总数 / 其中未处理数
+  errorMsg, attempts, nextRunAt, finishedAt, createdAt
+}
+
+ReconDiffItem = {
+  id, batchId, passageId, passageName, provider, billDate, bizType, diffType,
+  orderNo, refundNo, upstreamTradeNo,
+  localAmount, upstreamAmount,    // 可能为 null（对应一侧不存在）
+  localStatus,                    // 本地单据当时的状态描述，如"待支付""订单不存在"
+  status, remark, handledBy, handledAt, createdAt
+}
+```
+
+对账只产出差异，不自动改账。`diffType=1` 且本地订单存在但未成功（掉单）时，可到订单详情执行"同步"补单后，再把差异标记为已处理。

@@ -8,7 +8,7 @@ import { usePagedTable } from '@/composables/usePagedTable'
 import { useMetaStore } from '@/stores/meta'
 import ContentDialog, { type ContentSection } from '@/components/ContentDialog.vue'
 import EnumTag from '@/components/EnumTag.vue'
-import OrderDetailDrawer from '@/components/OrderDetailDrawer.vue'
+import DetailDrawers from '@/components/DetailDrawers.vue'
 import ProviderSelect from '@/components/ProviderSelect.vue'
 import TablePager from '@/components/TablePager.vue'
 import TimeRangePicker from '@/components/TimeRangePicker.vue'
@@ -77,12 +77,10 @@ function view(row: UpstreamNotifyItem) {
   contentVisible.value = true
 }
 
-const detailVisible = ref(false)
-const detailOrderNo = ref('')
+const drawers = ref<InstanceType<typeof DetailDrawers>>()
 
 function openOrder(orderNo: string) {
-  detailOrderNo.value = orderNo
-  detailVisible.value = true
+  drawers.value?.openOrder(orderNo)
 }
 </script>
 
@@ -187,6 +185,6 @@ function openOrder(orderNo: string) {
     </el-card>
 
     <ContentDialog v-model="contentVisible" :title="contentTitle" :sections="contentSections" />
-    <OrderDetailDrawer v-model="detailVisible" :order-no="detailOrderNo" />
+    <DetailDrawers ref="drawers" />
   </div>
 </template>

@@ -6,17 +6,17 @@ import { ElMessage } from 'element-plus'
 import { channelsApi } from '@/api/channels'
 import { ordersApi } from '@/api/orders'
 import { passagesApi } from '@/api/passages'
-import type { ChannelBrief, OrderItem, OrderListQuery, OrderStatus, PassageBrief } from '@/api/types'
+import type { ChannelBrief, OrderItem, OrderListQuery, OrderStatus, OrderType, PassageBrief } from '@/api/types'
 import { usePagedTable } from '@/composables/usePagedTable'
 import { useAuthStore } from '@/stores/auth'
 import { useMetaStore } from '@/stores/meta'
 import AppSelect from '@/components/AppSelect.vue'
 import EnumTag from '@/components/EnumTag.vue'
-import OrderDetailDrawer from '@/components/OrderDetailDrawer.vue'
+import DetailDrawers from '@/components/DetailDrawers.vue'
 import ProviderSelect from '@/components/ProviderSelect.vue'
 import TablePager from '@/components/TablePager.vue'
 import TimeRangePicker from '@/components/TimeRangePicker.vue'
-import { ORDER_STATUS, enumLabel } from '@/utils/enums'
+import { ORDER_STATUS, ORDER_TYPE, enumLabel } from '@/utils/enums'
 import { formatMoney } from '@/utils/money'
 import { formatTime, rangeToQuery, type DateRange } from '@/utils/time'
 
@@ -33,6 +33,8 @@ interface Query {
   passageId: number | undefined
   provider: string | undefined
   status: OrderStatus | undefined
+  orderType: OrderType | undefined
+  subNo: string
   userId: string
   timeRange: DateRange
 }
@@ -67,6 +69,8 @@ const { query, items, total, page, pageSize, loading, load, search, reset, onPag
         passageId: first ? queryNumber('passageId') : undefined,
         provider: first ? queryString('provider') || undefined : undefined,
         status: first ? (queryNumber('status') as OrderStatus | undefined) : undefined,
+        orderType: first ? (queryNumber('orderType') as OrderType | undefined) : undefined,
+        subNo: first ? queryString('subNo') : '',
         userId: '',
         timeRange: null,
       }
@@ -80,6 +84,8 @@ const { query, items, total, page, pageSize, loading, load, search, reset, onPag
       passageId: q.passageId,
       provider: q.provider,
       status: q.status,
+      orderType: q.orderType,
+      subNo: q.subNo,
       userId: q.userId,
       ...rangeToQuery(q.timeRange),
     }),
@@ -128,12 +134,14 @@ onMounted(() => {
 })
 
 // ---------- 详情 / 快捷操作 ----------
-const detailVisible = ref(false)
-const detailOrderNo = ref('')
+const drawers = ref<InstanceType<typeof DetailDrawers>>()
 
 function openDetail(orderNo: string) {
-  detailOrderNo.value = orderNo
-  detailVisible.value = true
+  drawers.value?.openOrder(orderNo)
+}
+
+function openSubscription(subNo: string) {
+  drawers.value?.openSubscription(subNo)
 }
 
 const syncingNo = ref('')
@@ -219,6 +227,20 @@ async function quickSync(row: OrderItem) {
             <el-option v-for="s in ORDER_STATUS" :key="s.value" :value="s.value" :label="s.label" />
           </el-select>
         </el-form-item>
+        <el-form-item label="订单类型">
+          <el-select v-model="query.orderType" placeholder="全部" clearable style="width: 220px" @change="search">
+            <el-option v-for="s in ORDER_TYPE" :key="s.value" :value="s.value" :label="s.label" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="订阅号">
+          <el-input
+            v-model="query.subNo"
+            placeholder="平台订阅号"
+            clearable
+            style="width: 220px"
+            @keyup.enter="search"
+          />
+        </el-form-item>
         <el-form-item label="创建时间">
           <TimeRangePicker v-model="query.timeRange" />
         </el-form-item>
@@ -248,6 +270,12 @@ async function quickSync(row: OrderItem) {
                 {{ row.orderNo }}
               </el-link>
               <span class="mono text-secondary">{{ row.mchOrderNo || '-' }}</span>
+              <span v-if="row.subNo" class="text-small sub-line">
+                <span class="text-secondary">订阅</span>
+                <el-link type="primary" underline="never" class="mono" @click="openSubscription(row.subNo)">
+                  {{ row.subNo }}
+                </el-link>
+              </span>
             </div>
           </template>
         </el-table-column>
@@ -287,9 +315,12 @@ async function quickSync(row: OrderItem) {
             </div>
           </template>
         </el-table-column>
-        <el-table-column label="状态" width="96" align="center">
+        <el-table-column label="状态 / 类型" width="100" align="center">
           <template #default="{ row }">
-            <EnumTag :options="ORDER_STATUS" :value="row.status" />
+            <div class="cell-stack cell-stack--tight">
+              <EnumTag :options="ORDER_STATUS" :value="row.status" />
+              <EnumTag :options="ORDER_TYPE" :value="row.orderType ?? 0" size="small" effect="plain" />
+            </div>
           </template>
         </el-table-column>
         <el-table-column label="创建 / 支付时间" width="165">
@@ -325,6 +356,17 @@ async function quickSync(row: OrderItem) {
       />
     </el-card>
 
-    <OrderDetailDrawer v-model="detailVisible" :order-no="detailOrderNo" @changed="load" />
+    <DetailDrawers ref="drawers" @changed="load" />
   </div>
 </template>
+
+<style scoped>
+.sub-line {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.sub-line .el-link {
+  font-size: 12px;
+}
+</style>

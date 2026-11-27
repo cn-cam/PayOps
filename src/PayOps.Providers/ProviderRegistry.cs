@@ -45,6 +45,7 @@ public static class ProviderServiceCollectionExtensions
         services.AddSingleton<IPayProvider, WechatProvider>();
         services.AddSingleton<IPayProvider, AlipayProvider>();
         services.AddSingleton<IPayProvider, DouyinProvider>();
+        services.AddSingleton<IPayProvider, DouyinMpProvider>();
         services.AddSingleton<IPayProvider, HuaweiProvider>();
         services.AddSingleton<IPayProvider, HonorProvider>();
         services.AddSingleton<IPayProvider, OppoProvider>();

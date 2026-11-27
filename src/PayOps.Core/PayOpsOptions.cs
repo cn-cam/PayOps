@@ -23,6 +23,7 @@ public sealed class PayOpsOptions
     public OrderOptions Order { get; set; } = new();
     public NotifyOptions Notify { get; set; } = new();
     public BreakerOptions Breaker { get; set; } = new();
+    public ReconOptions Recon { get; set; } = new();
 
     public bool HasRole(string role) =>
         Roles.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
@@ -96,4 +97,15 @@ public sealed class BreakerOptions
     public int FailureThreshold { get; set; } = 5;
     public int WindowSeconds { get; set; } = 60;
     public int OpenSeconds { get; set; } = 30;
+}
+
+public sealed class ReconOptions
+{
+    /// <summary>是否每天自动为支持账单的通道生成昨日对账批次。</summary>
+    public bool Enabled { get; set; } = true;
+    /// <summary>业务时区几点之后开始对昨天的账（微信/抖音账单 10 点后可取）。</summary>
+    public int Hour { get; set; } = 10;
+    /// <summary>账单未就绪时的最大尝试次数与重试间隔。</summary>
+    public int MaxAttempts { get; set; } = 6;
+    public int RetryMinutes { get; set; } = 60;
 }

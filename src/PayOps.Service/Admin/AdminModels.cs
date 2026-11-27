@@ -166,6 +166,8 @@ public class OrderItem
     public string PassageName { get; set; } = "";
     public string Provider { get; set; } = "";
     public string PayMethod { get; set; } = "";
+    public OrderType OrderType { get; set; }
+    public string SubNo { get; set; } = "";
     public string Subject { get; set; } = "";
     public long Amount { get; set; }
     public long RefundAmount { get; set; }
@@ -210,7 +212,128 @@ public class OrderQuery : PageQuery
     public long? PassageId { get; set; }
     public string? Provider { get; set; }
     public int? Status { get; set; }
+    public int? OrderType { get; set; }
+    public string? SubNo { get; set; }
     public string? UserId { get; set; }
+}
+
+// ---------------- 订阅 ----------------
+
+public class SubscriptionItem
+{
+    public long Id { get; set; }
+    public string SubNo { get; set; } = "";
+    public long AppId { get; set; }
+    public string AppCode { get; set; } = "";
+    public string ChannelCode { get; set; } = "";
+    public long PassageId { get; set; }
+    public string PassageName { get; set; } = "";
+    public string Provider { get; set; } = "";
+    public string ProductId { get; set; } = "";
+    public string UserId { get; set; } = "";
+    public string UpstreamSubId { get; set; } = "";
+    public SubscriptionStatus Status { get; set; }
+    public bool AutoRenew { get; set; }
+    public long Amount { get; set; }
+    public DateTime? PeriodStart { get; set; }
+    public DateTime? ExpiresAt { get; set; }
+    public DateTime? CancelAt { get; set; }
+    public int RenewCount { get; set; }
+    public string FirstOrderNo { get; set; } = "";
+    public string LastOrderNo { get; set; } = "";
+    public DateTime CreatedAt { get; set; }
+    public DateTime UpdatedAt { get; set; }
+}
+
+public class SubscriptionDetail : SubscriptionItem
+{
+    public string NotifyUrl { get; set; } = "";
+    public string Attach { get; set; } = "";
+    public DateTime? NextCheckAt { get; set; }
+    public int CheckCount { get; set; }
+    public List<OrderItem> Orders { get; set; } = [];
+    public List<NotifyTaskItem> NotifyTasks { get; set; } = [];
+}
+
+public class SubscriptionQuery : PageQuery
+{
+    public string? SubNo { get; set; }
+    public long? AppId { get; set; }
+    public string? Provider { get; set; }
+    public int? Status { get; set; }
+    public bool? AutoRenew { get; set; }
+    public string? UserId { get; set; }
+    public string? ProductId { get; set; }
+}
+
+// ---------------- 对账 ----------------
+
+public class ReconBatchItem
+{
+    public long Id { get; set; }
+    public long PassageId { get; set; }
+    public string PassageName { get; set; } = "";
+    public string Provider { get; set; } = "";
+    public string ProviderName { get; set; } = "";
+    public string BillDate { get; set; } = "";
+    public ReconStatus Status { get; set; }
+    public int UpstreamPayCount { get; set; }
+    public long UpstreamPayAmount { get; set; }
+    public int UpstreamRefundCount { get; set; }
+    public long UpstreamRefundAmount { get; set; }
+    public int LocalPayCount { get; set; }
+    public long LocalPayAmount { get; set; }
+    public int LocalRefundCount { get; set; }
+    public long LocalRefundAmount { get; set; }
+    public int DiffCount { get; set; }
+    public int OpenDiffCount { get; set; }
+    public string ErrorMsg { get; set; } = "";
+    public int Attempts { get; set; }
+    public DateTime? NextRunAt { get; set; }
+    public DateTime? FinishedAt { get; set; }
+    public DateTime CreatedAt { get; set; }
+}
+
+public class ReconBatchQuery
+{
+    public int Page { get; set; } = 1;
+    public int PageSize { get; set; } = 20;
+    public long? PassageId { get; set; }
+    public string? Provider { get; set; }
+    public int? Status { get; set; }
+    public string? StartDate { get; set; }
+    public string? EndDate { get; set; }
+}
+
+public class ReconDiffItem
+{
+    public long Id { get; set; }
+    public long BatchId { get; set; }
+    public long PassageId { get; set; }
+    public string PassageName { get; set; } = "";
+    public string Provider { get; set; } = "";
+    public string BillDate { get; set; } = "";
+    public ReconBizType BizType { get; set; }
+    public ReconDiffType DiffType { get; set; }
+    public string OrderNo { get; set; } = "";
+    public string RefundNo { get; set; } = "";
+    public string UpstreamTradeNo { get; set; } = "";
+    public long? LocalAmount { get; set; }
+    public long? UpstreamAmount { get; set; }
+    public string LocalStatus { get; set; } = "";
+    public int Status { get; set; }
+    public string Remark { get; set; } = "";
+    public string HandledBy { get; set; } = "";
+    public DateTime? HandledAt { get; set; }
+    public DateTime CreatedAt { get; set; }
+}
+
+public class ReconDiffQuery : ReconBatchQuery
+{
+    public long? BatchId { get; set; }
+    public int? DiffType { get; set; }
+    public int? BizType { get; set; }
+    public string? OrderNo { get; set; }
 }
 
 public class RefundItem
@@ -327,6 +450,8 @@ public class DashboardSummary
     public long PendingNotify { get; set; }
     public long FailedNotify { get; set; }
     public long ProcessingRefund { get; set; }
+    public long ActiveSubscriptions { get; set; }
+    public long OpenReconDiffs { get; set; }
 }
 
 public class TrendPoint

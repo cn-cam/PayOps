@@ -9,4 +9,10 @@
   <ItemGroup>
     <PackageReference Include="Microsoft.AspNetCore.Authentication.JwtBearer" />
   </ItemGroup>
+  <ItemGroup>
+    <!-- 开发/本机私有配置不随发布产物分发 -->
+    <Content Update="appsettings.Development.json" CopyToPublishDirectory="Never" />
+    <Content Update="appsettings.Local.json" CopyToPublishDirectory="Never" />
+    <Content Update="appsettings.Local.example.json" CopyToPublishDirectory="Never" />
+  </ItemGroup>
 </Project>

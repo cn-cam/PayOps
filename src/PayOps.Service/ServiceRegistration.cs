@@ -45,6 +45,8 @@ public static class ServiceRegistration
         services.AddSingleton<NotifyService>();
         services.AddSingleton<OrderService>();
         services.AddSingleton<RefundService>();
+        services.AddSingleton<SubscriptionService>();
+        services.AddSingleton<ReconService>();
         services.AddSingleton<UpstreamNotifyService>();
         services.AddSingleton<AppAuthService>();
         services.AddSingleton<AdminConfigService>();

@@ -10,7 +10,7 @@ import { useAuthStore } from '@/stores/auth'
 import { useMetaStore } from '@/stores/meta'
 import AppSelect from '@/components/AppSelect.vue'
 import EnumTag from '@/components/EnumTag.vue'
-import OrderDetailDrawer from '@/components/OrderDetailDrawer.vue'
+import DetailDrawers from '@/components/DetailDrawers.vue'
 import TablePager from '@/components/TablePager.vue'
 import TimeRangePicker from '@/components/TimeRangePicker.vue'
 import { REFUND_SOURCE, REFUND_STATUS, enumLabel } from '@/utils/enums'
@@ -82,12 +82,10 @@ async function sync(row: RefundItem) {
   }
 }
 
-const detailVisible = ref(false)
-const detailOrderNo = ref('')
+const drawers = ref<InstanceType<typeof DetailDrawers>>()
 
 function openOrder(orderNo: string) {
-  detailOrderNo.value = orderNo
-  detailVisible.value = true
+  drawers.value?.openOrder(orderNo)
 }
 </script>
 
@@ -221,6 +219,6 @@ function openOrder(orderNo: string) {
       />
     </el-card>
 
-    <OrderDetailDrawer v-model="detailVisible" :order-no="detailOrderNo" @changed="load" />
+    <DetailDrawers ref="drawers" @changed="load" />
   </div>
 </template>

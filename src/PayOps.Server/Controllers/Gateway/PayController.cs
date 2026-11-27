@@ -14,6 +14,13 @@ public sealed class OrderRef
     public string? MchOrderNo { get; set; }
 }
 
+public sealed class SubscriptionRef
+{
+    public string? SubNo { get; set; }
+    public string? OrderNo { get; set; }
+    public string? MchOrderNo { get; set; }
+}
+
 public sealed class VerifyReceiptRequest
 {
     public string? OrderNo { get; set; }
@@ -30,6 +37,7 @@ public sealed class VerifyReceiptRequest
 public sealed class PayController(
     OrderService orders,
     RefundService refunds,
+    SubscriptionService subscriptions,
     RouteService router,
     ConfigCache cache,
     IPayProviderRegistry providers) : ControllerBase
@@ -90,6 +98,27 @@ public sealed class PayController(
         return ApiResult.Ok(ToView(refund));
     }
 
+    /// <summary>查询订阅：可按订阅号，或按订阅首购订单号定位；sync=true 时向商店查询并同步最新状态。</summary>
+    [HttpGet("subscriptions")]
+    public async Task<ApiResult> QuerySubscription([FromQuery] string? subNo, [FromQuery] string? orderNo, [FromQuery] string? mchOrderNo, [FromQuery] bool sync, CancellationToken ct)
+    {
+        var sub = await subscriptions.RequireAsync(HttpContext.CurrentApp().Id, subNo, orderNo, mchOrderNo);
+        if (sync)
+        {
+            await subscriptions.SyncAsync(sub, ct);
+            sub = (await subscriptions.FindAsync(sub.SubNo))!;
+        }
+        return ApiResult.Ok(ToView(sub));
+    }
+
+    /// <summary>退订：停止自动续订，当前已付费周期仍然有效。仅支持服务端退订的支付类型可用。</summary>
+    [HttpPost("subscriptions/cancel")]
+    public async Task<ApiResult> CancelSubscription([FromBody] SubscriptionRef request, CancellationToken ct)
+    {
+        var sub = await subscriptions.RequireAsync(HttpContext.CurrentApp().Id, request.SubNo, request.OrderNo, request.MchOrderNo);
+        return ApiResult.Ok(ToView(await subscriptions.CancelAsync(sub, ct)));
+    }
+
     /// <summary>收银台可用支付方式：返回该渠道在给定金额下当前有可用通道的支付方式。</summary>
     [HttpGet("methods")]
     public async Task<ApiResult> Methods([FromQuery] string channel, [FromQuery] long amount)
@@ -120,6 +149,8 @@ public sealed class PayController(
         channel = o.ChannelCode,
         o.Provider,
         o.PayMethod,
+        orderType = (int)o.OrderType,
+        o.SubNo,
         o.Amount,
         o.RefundAmount,
         o.Currency,
@@ -132,6 +163,26 @@ public sealed class PayController(
         o.CreatedAt,
         o.PaidAt,
         o.ExpireAt,
+    };
+
+    private static object ToView(PaySubscription s) => new
+    {
+        s.SubNo,
+        channel = s.ChannelCode,
+        s.Provider,
+        s.ProductId,
+        s.UserId,
+        status = (int)s.Status,
+        s.AutoRenew,
+        s.Amount,
+        s.PeriodStart,
+        s.ExpiresAt,
+        s.CancelAt,
+        s.RenewCount,
+        s.FirstOrderNo,
+        s.LastOrderNo,
+        s.Attach,
+        s.CreatedAt,
     };
 
     private static object ToView(PayRefund r) => new

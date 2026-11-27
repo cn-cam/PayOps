@@ -29,8 +29,20 @@ export type OrderStatus = 0 | 1 | 2 | 3
 export type RefundStatus = 0 | 1 | 2
 /** 0 待通知，1 通知成功，2 通知失败（重试耗尽） */
 export type NotifyStatus = 0 | 1 | 2
+/** 1 支付，2 退款，3 订阅状态变更 */
+export type NotifyType = 1 | 2 | 3
+/** 0 一次性支付，1 订阅首购，2 订阅续费（由上游扣款事件生成，生来已支付） */
+export type OrderType = 0 | 1 | 2
+/** 1 生效中，2 已过期，3 已撤销（退款/撤回） */
+export type SubscriptionStatus = 1 | 2 | 3
+/** 0 待执行，1 已平账，2 有差异，3 失败 */
+export type ReconStatus = 0 | 1 | 2 | 3
 /** 1 支付，2 退款 */
-export type NotifyType = 1 | 2
+export type ReconBizType = 1 | 2
+/** 1 上游有本地无（或本地未成功），2 本地有上游无，3 金额不一致 */
+export type ReconDiffType = 1 | 2 | 3
+/** 0 待处理，1 已处理 */
+export type ReconDiffStatus = 0 | 1
 export type Role = 'admin' | 'operator' | 'viewer'
 
 // ---------- 认证 ----------
@@ -72,6 +84,12 @@ export interface ProviderCapabilities {
   refund: boolean
   receiptVerify: boolean
   serverNotify: boolean
+  /** 支持自动续费订阅 */
+  subscription: boolean
+  /** 支持服务端退订（否则只能用户在商店侧退订） */
+  subscriptionCancel: boolean
+  /** 支持下载对账单（可对账） */
+  bill: boolean
 }
 
 export interface ConfigFieldOption {
@@ -117,6 +135,8 @@ export interface DashboardSummary {
   pendingNotify: number
   failedNotify: number
   processingRefund: number
+  activeSubscriptions: number
+  openReconDiffs: number
 }
 
 export interface TrendPoint {
@@ -395,6 +415,9 @@ export interface OrderItem {
   passageName: string
   provider: string
   payMethod: string
+  orderType: OrderType
+  /** 所属订阅号；非订阅订单为空 */
+  subNo: string | null
   subject: string
   amount: number
   refundAmount: number
@@ -438,6 +461,8 @@ export interface OrderListQuery extends PageQuery, TimeRangeQuery {
   passageId?: number
   provider?: string
   status?: OrderStatus
+  orderType?: OrderType
+  subNo?: string
   userId?: string
 }
 
@@ -466,6 +491,8 @@ export interface TestOrderInput {
   productId: string
   openId: string
   userId: string
+  /** true 为订阅首购，仅 capabilities.subscription 的支付类型可用 */
+  subscribe: boolean
 }
 
 export interface TestOrderCredential {
@@ -480,6 +507,7 @@ export interface TestOrderResult {
   amount: number
   provider: string
   payMethod: string
+  orderType: OrderType
   passageId: number
   passageName: string
   expireAt: string | null
@@ -602,4 +630,140 @@ export interface AuditLogItem {
 export interface AuditLogQuery extends PageQuery, TimeRangeQuery {
   username?: string
   action?: string
+}
+
+// ---------- 订阅（自动续费） ----------
+export interface SubscriptionItem {
+  id: number
+  subNo: string
+  appId: number
+  appCode: string
+  channelCode: string
+  passageId: number
+  passageName: string
+  provider: string
+  productId: string | null
+  userId: string | null
+  upstreamSubId: string | null
+  status: SubscriptionStatus
+  /** false 表示已退订，当前周期结束后失效 */
+  autoRenew: boolean
+  /** 最近一期金额（分） */
+  amount: number
+  periodStart: string | null
+  expiresAt: string | null
+  cancelAt: string | null
+  renewCount: number
+  firstOrderNo: string | null
+  lastOrderNo: string | null
+  createdAt: string
+  updatedAt: string
+}
+
+export interface SubscriptionDetail extends SubscriptionItem {
+  notifyUrl: string | null
+  attach: string | null
+  nextCheckAt: string | null
+  checkCount: number
+  /** 首购单 + 各期续费单，按时间倒序 */
+  orders: OrderItem[]
+  /** 订阅状态变更通知（type=3） */
+  notifyTasks: NotifyTaskItem[]
+}
+
+export interface SubscriptionListQuery extends PageQuery, TimeRangeQuery {
+  subNo?: string
+  appId?: number
+  provider?: string
+  status?: SubscriptionStatus
+  autoRenew?: boolean
+  userId?: string
+  productId?: string
+}
+
+/** renew 续费一期 / cancel 退订 / resume 恢复续订 / expire 到期 / revoke 撤销 */
+export type SubscriptionMockEvent = 'renew' | 'cancel' | 'resume' | 'expire' | 'revoke'
+
+// ---------- 对账 ----------
+export interface ReconBatchItem {
+  id: number
+  passageId: number
+  passageName: string
+  provider: string
+  providerName: string
+  /** yyyy-MM-dd */
+  billDate: string
+  status: ReconStatus
+  upstreamPayCount: number
+  upstreamPayAmount: number
+  upstreamRefundCount: number
+  upstreamRefundAmount: number
+  localPayCount: number
+  localPayAmount: number
+  localRefundCount: number
+  localRefundAmount: number
+  /** 差异总数 */
+  diffCount: number
+  /** 其中未处理数 */
+  openDiffCount: number
+  errorMsg: string | null
+  attempts: number
+  nextRunAt: string | null
+  finishedAt: string | null
+  createdAt: string
+}
+
+export interface ReconBatchListQuery extends PageQuery {
+  passageId?: number
+  provider?: string
+  status?: ReconStatus
+  /** yyyy-MM-dd，按账单日筛选，闭区间 */
+  startDate?: string
+  endDate?: string
+}
+
+export interface ReconBatchCreateInput {
+  passageId: number
+  /** yyyy-MM-dd，必须早于今天 */
+  billDate: string
+}
+
+export interface ReconDiffItem {
+  id: number
+  batchId: number
+  passageId: number
+  passageName: string
+  provider: string
+  billDate: string
+  bizType: ReconBizType
+  diffType: ReconDiffType
+  orderNo: string | null
+  refundNo: string | null
+  upstreamTradeNo: string | null
+  /** 可能为 null（本地一侧不存在） */
+  localAmount: number | null
+  /** 可能为 null（上游一侧不存在） */
+  upstreamAmount: number | null
+  /** 本地单据当时的状态描述，如"待支付""订单不存在" */
+  localStatus: string | null
+  status: ReconDiffStatus
+  remark: string | null
+  handledBy: string | null
+  handledAt: string | null
+  createdAt: string
+}
+
+export interface ReconDiffListQuery extends PageQuery {
+  batchId?: number
+  passageId?: number
+  status?: ReconDiffStatus
+  diffType?: ReconDiffType
+  bizType?: ReconBizType
+  orderNo?: string
+  startDate?: string
+  endDate?: string
+}
+
+export interface ReconDiffHandleInput {
+  remark: string
 }

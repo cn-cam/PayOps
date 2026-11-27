@@ -57,6 +57,10 @@ const capabilityTags = computed(() => {
     { label: '退款', on: c.refund },
     { label: '票据校验', on: c.receiptVerify },
     { label: '服务端回调', on: c.serverNotify },
+    { label: '自动续费订阅', on: c.subscription },
+    // 不支持订阅的类型谈不上退订，不展示这一项
+    ...(c.subscription ? [{ label: '服务端退订', on: c.subscriptionCancel }] : []),
+    { label: '对账单', on: c.bill },
   ]
 })
 

@@ -174,14 +174,30 @@ async function remove(row: PassageItem) {
       </div>
 
       <el-table v-loading="loading" :data="items" row-key="id">
-        <el-table-column label="通道名称" min-width="170" show-overflow-tooltip>
+        <el-table-column label="通道名称" min-width="160" show-overflow-tooltip>
           <template #default="{ row }">
             <span class="passage-name">{{ row.name }}</span>
           </template>
         </el-table-column>
-        <el-table-column label="支付类型" min-width="110">
+        <el-table-column label="支付类型" min-width="150">
           <template #default="{ row }">
-            <el-tag effect="plain">{{ row.providerName || meta.providerName(row.provider) }}</el-tag>
+            <div class="cell-stack cell-stack--tight">
+              <el-tag effect="plain">{{ row.providerName || meta.providerName(row.provider) }}</el-tag>
+              <span
+                v-if="
+                  meta.getProvider(row.provider)?.capabilities?.bill ||
+                  meta.getProvider(row.provider)?.capabilities?.subscription
+                "
+                class="cap-tags"
+              >
+                <el-tag v-if="meta.getProvider(row.provider)?.capabilities?.bill" type="success" size="small">
+                  可对账
+                </el-tag>
+                <el-tag v-if="meta.getProvider(row.provider)?.capabilities?.subscription" type="warning" size="small">
+                  支持订阅
+                </el-tag>
+              </span>
+            </div>
           </template>
         </el-table-column>
         <el-table-column label="状态" width="90" align="center">
@@ -214,11 +230,11 @@ async function remove(row: PassageItem) {
             <span v-else class="text-secondary">-</span>
           </template>
         </el-table-column>
-        <el-table-column label="备注" prop="remark" min-width="100" show-overflow-tooltip />
-        <el-table-column label="更新时间" width="165">
+        <el-table-column label="备注" prop="remark" min-width="80" show-overflow-tooltip />
+        <el-table-column label="更新时间" width="160">
           <template #default="{ row }">{{ formatTime(row.updatedAt) }}</template>
         </el-table-column>
-        <el-table-column label="操作" :width="auth.canWrite ? 190 : 80" fixed="right">
+        <el-table-column label="操作" :width="auth.canWrite ? 186 : 80" fixed="right">
           <template #default="{ row }">
             <el-button link type="primary" @click="openEdit(row as PassageItem)">
               {{ auth.canWrite ? '编辑' : '查看' }}
@@ -308,6 +324,11 @@ async function remove(row: PassageItem) {
 <style scoped>
 .passage-name {
   font-weight: 600;
+}
+.cap-tags {
+  display: inline-flex;
+  flex-wrap: nowrap;
+  gap: 4px;
 }
 .notify-cell {
   display: flex;

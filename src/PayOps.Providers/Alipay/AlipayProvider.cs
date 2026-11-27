@@ -24,7 +24,7 @@ public sealed class AlipayProvider(IHttpClientFactory httpFactory) : PayProvider
             new("alipay_page", "支付宝电脑网站支付"),
             new("alipay_qr", "支付宝扫码支付"),
         ],
-        Capabilities = new() { Query = true, Close = true, Refund = true },
+        Capabilities = new() { Query = true, Close = true, Refund = true, Bill = true },
         ConfigFields =
         [
             new() { Key = "appId", Label = "应用AppID", Required = true },
@@ -143,6 +143,85 @@ public sealed class AlipayProvider(IHttpClientFactory httpFactory) : PayProvider
         var success = resp.Str("refund_status") == "REFUND_SUCCESS"
                       || (resp.Str("refund_status").Length == 0 && resp.Str("refund_amount").Length > 0);
         return new RefundResult { State = success ? UpstreamRefundState.Success : UpstreamRefundState.Processing };
+    }
+
+    // ------------------------------------------------------------------ 账单
+
+    /// <summary>
+    /// 查询交易账单下载地址（bill_type=trade）并下载解析。下载地址 30 秒内有效；文件为 zip，内含 GBK 编码的"业务明细"与"汇总"两个 CSV。
+    /// </summary>
+    public override async Task<List<BillItem>> DownloadBillAsync(BillContext ctx, CancellationToken ct)
+    {
+        const string api = "alipay.data.dataservice.bill.downloadurl.query";
+        var biz = JsonSerializer.Serialize(new { bill_type = "trade", bill_date = ctx.BillDate.ToString("yyyy-MM-dd") });
+        var resp = await PostAsync(ctx.Config, BuildParams(ctx.Config, api, biz), api, ct);
+        // 当日无业务
+        if (resp.Str("sub_code") == "NO_BILL_DATA" || resp.Str("bill_file_code") == "EMPTY_DATA_WITH_BILL_FILE") return [];
+        EnsureSuccess(resp, "查询支付宝账单下载地址失败");
+
+        byte[] bytes;
+        try
+        {
+            using var file = await Http.GetAsync(resp.Str("bill_download_url"), ct);
+            bytes = await file.Content.ReadAsByteArrayAsync(ct);
+            if (!file.IsSuccessStatusCode) throw Upstream("BILL_DOWNLOAD", $"下载支付宝账单失败：HTTP {(int)file.StatusCode}");
+        }
+        catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException or IOException)
+        {
+            if (ct.IsCancellationRequested) throw;
+            throw new ProviderException("UPSTREAM_UNREACHABLE", $"下载支付宝账单网络异常：{ex.Message}", inner: ex);
+        }
+        return ParseBill(ExtractDetailCsv(bytes));
+    }
+
+    /// <summary>从账单 zip 中取出"业务明细"CSV 文本（跳过文件名含"汇总"的那个）。</summary>
+    public static string ExtractDetailCsv(byte[] zip)
+    {
+        Encoding.RegisterProvider(CodePagesEncodingProvider.Instance);
+        using var archive = new System.IO.Compression.ZipArchive(new MemoryStream(zip), System.IO.Compression.ZipArchiveMode.Read, false, Encoding.GetEncoding(936));
+        var entry = archive.Entries.FirstOrDefault(e => e.FullName.EndsWith(".csv", StringComparison.OrdinalIgnoreCase) && !e.FullName.Contains("汇总"))
+                    ?? archive.Entries.FirstOrDefault(e => e.FullName.EndsWith(".csv", StringComparison.OrdinalIgnoreCase))
+                    ?? throw new ProviderException("BILL_FORMAT", "支付宝账单压缩包内没有 CSV 文件");
+        using var stream = entry.Open();
+        using var buffer = new MemoryStream();
+        stream.CopyTo(buffer);
+        return BillCsv.Decode(buffer.ToArray());
+    }
+
+    /// <summary>
+    /// 解析业务明细（按表头名取列；以 # 开头的说明行会被自动跳过）。业务类型"交易"为支付行、"退款"为退款行；
+    /// 退款行金额为负数，商户退款请求号在"退款批次号/请求号"列。
+    /// </summary>
+    public static List<BillItem> ParseBill(string csv)
+    {
+        var items = new List<BillItem>();
+        foreach (var row in BillCsv.Rows(csv, ["商户订单号", "业务类型"]))
+        {
+            var amount = Math.Abs(BillCsv.Fen(row.GetValueOrDefault("订单金额（元）") ?? row.GetValueOrDefault("订单金额(元)", "0")));
+            switch (row["业务类型"])
+            {
+                case "交易":
+                    items.Add(new BillItem
+                    {
+                        Kind = BillItemKind.Pay,
+                        OrderNo = row["商户订单号"],
+                        UpstreamTradeNo = row.GetValueOrDefault("支付宝交易号", ""),
+                        Amount = amount,
+                    });
+                    break;
+                case "退款":
+                    items.Add(new BillItem
+                    {
+                        Kind = BillItemKind.Refund,
+                        OrderNo = row["商户订单号"],
+                        UpstreamTradeNo = row.GetValueOrDefault("支付宝交易号", ""),
+                        RefundNo = row.GetValueOrDefault("退款批次号/请求号") ?? row.GetValueOrDefault("退款批次号", ""),
+                        Amount = amount,
+                    });
+                    break;
+            }
+        }
+        return items;
     }
 
     public override Task<NotifyParseResult> ParseNotifyAsync(NotifyContext ctx, CancellationToken ct)

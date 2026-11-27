@@ -35,12 +35,16 @@ public sealed class NotifyService(
     };
     private readonly NotifyOptions _options = options.Value.Notify;
 
-    public static string BuildPayPayload(PayOrder o) => JsonSerializer.Serialize(new
+    /// <summary>支付成功通知。订阅首购/续费单额外携带 orderType、subNo 与订阅当前周期信息。</summary>
+    public static string BuildPayPayload(PayOrder o, PaySubscription? sub = null) => JsonSerializer.Serialize(new
     {
         type = "pay",
         appId = o.AppCode,
         orderNo = o.OrderNo,
         mchOrderNo = o.MchOrderNo,
+        orderType = (int)o.OrderType,
+        subNo = o.SubNo,
+        subscription = sub is null ? null : new { subNo = sub.SubNo, status = (int)sub.Status, autoRenew = sub.AutoRenew, periodStart = sub.PeriodStart, expiresAt = sub.ExpiresAt, renewCount = sub.RenewCount },
         channel = o.ChannelCode,
         provider = o.Provider,
         payMethod = o.PayMethod,
@@ -72,6 +76,28 @@ public sealed class NotifyService(
         errorMsg = r.ErrorMsg,
         attach = o.Attach,
         refundedAt = r.SuccessAt,
+    }, PayloadJson);
+
+    /// <summary>订阅状态变更通知：canceled（退订）/ resumed（恢复续订）/ expired（到期）/ revoked（撤销）。</summary>
+    public static string BuildSubscriptionPayload(PaySubscription s, string eventName) => JsonSerializer.Serialize(new
+    {
+        type = "subscription",
+        @event = eventName,
+        appId = s.AppCode,
+        subNo = s.SubNo,
+        channel = s.ChannelCode,
+        provider = s.Provider,
+        productId = s.ProductId,
+        userId = s.UserId,
+        status = (int)s.Status,
+        autoRenew = s.AutoRenew,
+        periodStart = s.PeriodStart,
+        expiresAt = s.ExpiresAt,
+        cancelAt = s.CancelAt,
+        renewCount = s.RenewCount,
+        firstOrderNo = s.FirstOrderNo,
+        lastOrderNo = s.LastOrderNo,
+        attach = s.Attach,
     }, PayloadJson);
 
     /// <summary>在业务事务内写入通知任务（同一业务单号幂等）。返回任务 ID，已存在时返回 0。</summary>
@@ -173,8 +199,17 @@ public sealed class NotifyService(
 
     private static string EventRoutingKey(PayNotifyTask task)
     {
-        if (task.Type == NotifyType.Pay) return "pay.success";
-        return task.Payload.Contains("\"refundStatus\":1", StringComparison.Ordinal) ? "refund.success" : "refund.failed";
+        switch (task.Type)
+        {
+            case NotifyType.Pay:
+                return "pay.success";
+            case NotifyType.Subscription:
+                foreach (var name in new[] { "canceled", "resumed", "expired", "revoked" })
+                    if (task.Payload.Contains($"\"event\":\"{name}\"", StringComparison.Ordinal)) return "subscription." + name;
+                return "subscription.changed";
+            default:
+                return task.Payload.Contains("\"refundStatus\":1", StringComparison.Ordinal) ? "refund.success" : "refund.failed";
+        }
     }
 
     private async Task<(int Status, string Response, bool Ok)> PostAsync(PayNotifyTask task, string secret, CancellationToken ct)
@@ -228,8 +263,9 @@ public sealed class NotifyService(
         if (taskId is null)
         {
             var url = await ResolveUrlAsync(order.AppId, order.NotifyUrl);
+            var sub = order.SubNo.Length == 0 ? null : await db.FirstOrDefaultAsync<PaySubscription>("SELECT * FROM pay_subscription WHERE sub_no = @SubNo", new { order.SubNo });
             taskId = await db.TransactionAsync((conn, tx) =>
-                InsertTaskAsync(conn, tx, order.AppId, order.AppCode, NotifyType.Pay, order.OrderNo, url, BuildPayPayload(order)));
+                InsertTaskAsync(conn, tx, order.AppId, order.AppCode, NotifyType.Pay, order.OrderNo, url, BuildPayPayload(order, sub)));
             await EnqueueAsync(taskId.Value);
             return;
         }

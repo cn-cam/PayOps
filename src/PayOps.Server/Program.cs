@@ -34,6 +34,9 @@ if (args.Contains("--healthcheck"))
 
 var builder = WebApplication.CreateBuilder(args);
 
+// 本机私有配置（真实的中间件账号等）：放在被 .gitignore 忽略的 appsettings.Local.json，避免凭证进入代码库
+builder.Configuration.AddJsonFile("appsettings.Local.json", optional: true, reloadOnChange: false);
+
 // 未显式指定监听地址（ASPNETCORE_URLS / ASPNETCORE_HTTP_PORTS / 配置文件 Urls / --urls）时默认 5080。
 // 不把默认值写进 appsettings.json：配置文件的优先级高于 ASPNETCORE_URLS，会让容器里的端口设置失效。
 if (string.IsNullOrEmpty(builder.Configuration["urls"]) && string.IsNullOrEmpty(builder.Configuration["http_ports"]))

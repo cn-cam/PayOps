@@ -34,26 +34,30 @@ src/
   api/
     http.ts               axios 实例：带 token、解包 {code,message,data}、401 跳登录、403 提示无权限
     types.ts              与接口契约对应的全部类型
-    *.ts                  按模块划分的接口方法
+    *.ts                  按模块划分的接口方法（含 subscriptions.ts 订阅、recon.ts 对账）
   composables/
     usePagedTable.ts      分页表格通用逻辑（查询条件、分页、loading、防乱序）
   utils/
     money.ts              分 ↔ 元（整数运算，避免浮点误差）
     time.ts               UTC ISO ↔ 本地时间、时间范围筛选参数
-    enums.ts              状态枚举的文案与标签颜色
+    enums.ts              状态枚举的文案与标签颜色（含对账差异类型的大白话解释）
+    subscription.ts       订阅当前周期的到期提示（即将到期 / 已过期高亮）
     common.ts             复制、二次确认、表单校验、JSON 美化等
     echarts.ts            ECharts 按需注册
-  components/             MoneyInput、EnumTag、JsonViewer、TablePager、TimeRangePicker、
-                          AppSelect、ProviderSelect、EChart、ContentDialog、
-                          OrderDetailDrawer（订单详情与操作，多个页面复用）、ChangePasswordDialog
+  components/             MoneyInput、EnumTag、JsonViewer、TablePager、TimeRangePicker、BillDateRangePicker、
+                          AppSelect、ProviderSelect、EChart、ContentDialog、ChangePasswordDialog、
+                          OrderDetailDrawer（订单详情与操作）、SubscriptionDetailDrawer（订阅详情与操作）、
+                          DetailDrawers（上面两个抽屉的组合，页面统一用它，订单与订阅可互相跳转）
   views/
     login/                登录
     dashboard/            仪表盘（今日/昨日、趋势、分布、集群节点）
     apps/                 应用管理
     channels/             渠道管理、渠道通道配置（BindingsView + BindingDialog + RouteSimulatePanel）
     passages/             通道管理（配置表单由 provider 元数据动态渲染）
-    orders/               订单管理、测试下单
+    orders/               订单管理、测试下单（支持订阅首购）
+    subscriptions/        订阅管理（自动续费）
     refunds/              退款管理
+    recon/                对账管理：ReconView（页签）+ ReconBatchesPanel（批次）+ ReconDiffsPanel（差异）
     notify/               业务通知、上游回调日志
     system/               用户管理、操作审计
     error/                403 / 404
@@ -67,6 +71,10 @@ src/
 - **角色**：`admin` 全部；`operator` 无用户管理、不能查看 / 重置应用密钥；`viewer` 只读（写操作按钮不渲染，测试下单不可见）。
   页面里用 `auth.canWrite` / `auth.canViewSecret` / `auth.isAdmin` 判断，路由用 `meta.roles` 限制。
 - **错误提示**：接口错误已在 `api/http.ts` 统一弹出，页面里只需要 `try { ... } finally { loading = false }`，不要重复提示。
+  个别需要完整展示后端说明的接口（如订阅退订）用 `http.post(url, data, { silent: true })` 关掉轻提示，自己 `catch HttpError` 后用对话框展示。
+- **订单 / 订阅详情**：页面里放一个 `<DetailDrawers ref="drawers" />`，用 `drawers.value?.openOrder(orderNo)` / `openSubscription(subNo)` 打开。
+- **页面间带条件跳转**：列表页首次加载会读取地址栏参数，如 `/orders?orderType=2&subNo=...`、`/subscriptions?status=1`、
+  `/recon?tab=diffs&status=0&batchId=12`（差异明细默认只看待处理，`status=all` 表示全部）。
 - **表格行类型**：Element Plus 的列插槽 `row` 没有具体类型，调用处理函数时写 `fn(row as XxxItem)`。
 
 ## 已知的坑

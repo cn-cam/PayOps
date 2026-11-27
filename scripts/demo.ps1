@@ -9,7 +9,9 @@
     3. 路由模拟：10 元只会命中 A，100 元按 70/30 分流；
     4. 通过带签名的业务接入 API 批量下单，统计实际通道分布；
     5. 模拟上游回调 → 订单成功 → 业务通知送达（演示接收端）；
-    6. 部分退款。
+    6. 部分退款；
+    7. 自动续费订阅：首购、续订、退订、恢复、到期；
+    8. 对账：平账与差异处理。
   需要服务以 Development 环境运行（开启了演示接收端）。
 
 .EXAMPLE
@@ -169,7 +171,76 @@ Assert ($again.data.refundNo -eq $refund.data.refundNo) "相同退款单号重�
 $over = Gateway POST "/api/pay/refunds" @{ orderNo = $order.orderNo; mchRefundNo = "RF2" + $order.orderNo; amount = 8000; reason = "超额" }
 Assert ($over.code -ne 0) "超过可退余额的退款被拒绝（$($over.message)）"
 
-Step "7. 集群与统计"
+Step "7. 自动续费订阅：首购 → 续订 → 退订 → 恢复 → 到期"
+$subOrder = Gateway POST "/api/pay/orders" @{
+    channel = "official"; payMethod = "mock"; mchOrderNo = "SUB" + [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+    amount = 1800; subject = "月度会员"; productId = "vip_month"; userId = "u1001"; subscribe = $true
+}
+Assert ($subOrder.code -eq 0 -and $subOrder.data.orderType -eq 1) "订阅首购下单成功（orderType=1）"
+$subNotifyUrl = $BaseUrl + ([Uri]$subOrder.data.credential.data.notifyUrl).AbsolutePath
+$cb = Invoke-WebRequest -Method Post -Uri $subNotifyUrl -Body $subOrder.data.credential.data.body -ContentType "application/json" -SkipHttpErrorCheck
+$sub = (Gateway GET "/api/pay/subscriptions?orderNo=$($subOrder.data.orderNo)").data
+Assert ($cb.Content -eq "success" -and $sub.status -eq 1 -and $sub.autoRenew -and $sub.renewCount -eq 0) "首购入账并建立订阅 $($sub.subNo)（生效中，自动续订）"
+$firstExpire = [DateTime]$sub.expiresAt
+
+Admin POST "/subscriptions/$($sub.subNo)/mock-event" @{ event = "renew" } | Out-Null
+$sub = (Gateway GET "/api/pay/subscriptions?subNo=$($sub.subNo)").data
+$subOrders = (Admin GET "/orders?subNo=$($sub.subNo)").items
+Assert ($sub.renewCount -eq 1 -and ([DateTime]$sub.expiresAt) -gt $firstExpire -and $subOrders.Count -eq 2) "续订：生成续费单（orderType=2），周期顺延，共 $($subOrders.Count) 笔订单"
+$renewal = $subOrders | Where-Object { $_.orderType -eq 2 }
+$renewNotified = $false
+for ($i = 0; $i -lt 20 -and -not $renewNotified; $i++) {
+    Start-Sleep -Milliseconds 500
+    $t = (Admin GET "/notify-tasks?bizNo=$($renewal.orderNo)").items
+    $renewNotified = ($t.Count -gt 0 -and $t[0].status -eq 1)
+}
+Assert $renewNotified "续费单的支付通知已送达业务方"
+
+$canceled = Gateway POST "/api/pay/subscriptions/cancel" @{ subNo = $sub.subNo }
+Assert ($canceled.code -eq 0 -and -not $canceled.data.autoRenew -and $canceled.data.status -eq 1) "退订：停止自动续订，当前周期内仍然生效"
+$again = Gateway POST "/api/pay/subscriptions/cancel" @{ subNo = $sub.subNo }
+Assert ($again.code -eq 0) "重复退订幂等"
+Admin POST "/subscriptions/$($sub.subNo)/mock-event" @{ event = "resume" } | Out-Null
+$sub = (Gateway GET "/api/pay/subscriptions?subNo=$($sub.subNo)").data
+Assert ($sub.autoRenew) "恢复续订（模拟商店通知）"
+Admin POST "/subscriptions/$($sub.subNo)/mock-event" @{ event = "expire" } | Out-Null
+$sub = (Gateway GET "/api/pay/subscriptions?subNo=$($sub.subNo)").data
+Assert ($sub.status -eq 2) "到期：订阅失效"
+$subDetail = Admin GET "/subscriptions/$($sub.subNo)"
+$subEvents = ($subDetail.notifyTasks | ForEach-Object { ($_.payload | ConvertFrom-Json).event }) -join ","
+Assert ($subDetail.notifyTasks.Count -eq 3) "退订 / 恢复 / 到期各产生一条业务通知（$subEvents）"
+
+Step "8. 对账：平账与差异"
+$yesterday = (Get-Date).AddDays(-1).ToString("yyyy-MM-dd")
+function Wait-Recon($passageId) {
+    for ($i = 0; $i -lt 40; $i++) {
+        $b = (Admin GET "/recon/batches?passageId=$passageId&startDate=$yesterday&endDate=$yesterday").items | Select-Object -First 1
+        if ($b -and $b.status -ne 0) { return $b }
+        Start-Sleep -Milliseconds 500
+    }
+    return $b
+}
+Admin POST "/recon/batches" @{ passageId = $pA; billDate = $yesterday } | Out-Null
+$balanced = Wait-Recon $pA
+Assert ($balanced.status -eq 1 -and $balanced.diffCount -eq 0) "通道 A 昨日对账：平账（上游 $($balanced.upstreamPayCount) 笔 / 本地 $($balanced.localPayCount) 笔）"
+
+$pDiff = (Admin GET "/passages/all?provider=mock") | Where-Object { $_.name -eq "模拟-对账差异" }
+$pDiffId = if ($pDiff) { $pDiff.id } else {
+    (Admin POST "/passages" @{ name = "模拟-对账差异"; provider = "mock"; status = 1; remark = "demo"; config = @{ secret = "demo-secret"; billMismatch = "true" } }).id
+}
+Admin POST "/recon/batches" @{ passageId = $pDiffId; billDate = $yesterday } | Out-Null
+$withDiff = Wait-Recon $pDiffId
+Assert ($withDiff.status -eq 2 -and $withDiff.diffCount -ge 1) "注入差异的通道：对账结果为有差异（$($withDiff.diffCount) 条）"
+$diffs = (Admin GET "/recon/diffs?batchId=$($withDiff.id)").items
+$diffs | ForEach-Object { Write-Host ("    差异 type={0} 订单={1} 本地={2} 上游={3} {4}" -f $_.diffType, $_.orderNo, $_.localAmount, $_.upstreamAmount, $_.localStatus) }
+Assert (($diffs | Where-Object { $_.diffType -eq 1 }).Count -ge 1) "识别出上游有本地无的记录"
+Admin POST "/recon/diffs/$($diffs[0].id)/handle" @{ remark = "演示：已核实" } | Out-Null
+$after = (Admin GET "/recon/batches?passageId=$pDiffId&startDate=$yesterday&endDate=$yesterday").items[0]
+Assert ($after.openDiffCount -eq $withDiff.diffCount - 1) "差异标记为已处理后，未处理数减少"
+$today = Invoke-RestMethod -Method Post -Uri "$BaseUrl/api/admin/recon/batches" -Headers @{ Authorization = "Bearer $script:Token" } -ContentType "application/json" -Body (@{ passageId = $pA; billDate = (Get-Date).ToString("yyyy-MM-dd") } | ConvertTo-Json)
+Assert ($today.code -ne 0) "今天的账不能对（$($today.message)）"
+
+Step "9. 集群与统计"
 $info = Admin GET "/system/info"
 $info.checks | ForEach-Object { Write-Host ("    {0,-9} ok={1} {2}" -f $_.name, $_.ok, $_.message) }
 $info.nodes | ForEach-Object { Write-Host ("    节点 {0}  角色={1}  节点号={2}" -f $_.instanceId, ($_.roles -join ","), $_.workerId) }

@@ -47,6 +47,22 @@
 | 通知无签名的平台 | 只把通知当触发器，从中取出 token 回源查询（参考 `HuaweiProvider`） |
 | 访问令牌 | 进程内缓存即可（参考 `HuaweiProvider.Tokens`），各副本各自缓存 |
 
+## 订阅能力（`Capabilities.Subscription`）
+
+- 首购：`CreateAsync` 收到 `ctx.Subscribe` 时返回商店需要的参数；`VerifyReceiptAsync` 与"扣款成功"通知在结果里带上 `SubscriptionInfo`（`UpstreamSubId` 必须是各期不变的订阅标识；`Token` 是后续查询/退订要用的凭证；`Amount` 仅记录不校验）。
+- 通知：首购和续费都上报 `NotifyEvent { Type = Subscription, SubKind = Charged, UpstreamTradeNo = 本期交易号, OrderNo = 凭证里绑定的首购订单号（没有就留空）}`，由 `SubscriptionService` 按订阅是否已存在区分；退订/恢复/到期/撤销分别用 `AutoRenewOff / AutoRenewOn / Expired / Revoked`。
+- 退款：订阅的每期扣款对应不同订单，退款事件的 `OrderNo` 留空、`UpstreamTradeNo` 填被退的那一期交易号，服务层按上游交易号反查订单。
+- `QuerySubscriptionAsync`：到期巡检用。能确定就返回 `Known = true` 以及 `Active / AutoRenew / ExpiresAt / LatestTradeNo`；不能主动查询就保持默认（`Known = false`，到期 1 天后自动判过期）。
+- `CancelSubscriptionAsync`：商店支持服务端退订才实现并声明 `SubscriptionCancel = true`；否则保持默认（抛 NOT_SUPPORTED，提示引导用户到商店退订）。
+- 模拟通道（`MockProvider`）是参考实现，`scripts/demo.ps1` 第 7 步是端到端用例。
+
+## 对账单能力（`Capabilities.Bill`）
+
+- 实现 `DownloadBillAsync(BillContext)`：按 `ctx.BillDate` 下载并解析为 `BillItem` 列表（支付行：`OrderNo` + `UpstreamTradeNo` + 订单金额；退款行：`RefundNo` + 退款金额；金额一律为正的分）。`ctx.LocalItems` 只给模拟通道用，真实类型必须忽略。
+- 当日无交易返回空列表；账单尚未生成抛 `ProviderException`（`ReconService` 会按间隔重试）。
+- 把"下载"和"解析"分开，解析写成 `public static List<BillItem> ParseBill(string csv)` 以便单测；用 `BillCsv.Rows` 按**表头名**取列（各家都可能增减列），`BillCsv.Decode` 处理 UTF-8/GBK，`BillCsv.Gunzip` 处理压缩，`BillCsv.Fen` 把元转分。
+- 只把终态成功的退款行计入（账单里的退款状态是出账时的快照）。
+
 ## 通用工具（`Providers/Common/ProviderBase.cs`）
 
 `KeyUtil`（RSA 加载/签名/验签，支持 PEM 与裸 Base64、MD5、Base64Url）、`JsonExt`（`Str` / `Long` / `Obj` 宽松取值）、`TimeUtil`（北京时间互转、Unix 时间）、`Money`（分 ↔ 元字符串）、`SendAsync`（统一网络异常）。

@@ -26,7 +26,7 @@ description: 在 PayOps（自用多渠道多通道支付系统：.NET 10 + Vue3 
 | --- | --- |
 | `src/PayOps.Core` | 实体、`IPayProvider` 契约、`PassageRouter`（路由纯函数）、`ApiSigner`、`SecretProtector`、`OrderNoGenerator`、`PayOpsOptions` |
 | `src/PayOps.Providers` | 各支付类型实现；`ProviderRegistry.cs` 注册 |
-| `src/PayOps.Service/Pay` | `OrderService`（下单/入账/查单/关单/巡检）、`RefundService`、`NotifyService`（发件箱）、`UpstreamNotifyService`、`RouteService`、`AppAuthService` |
+| `src/PayOps.Service/Pay` | `OrderService`（下单/入账/查单/关单/巡检/续费单）、`RefundService`、`SubscriptionService`（订阅事件/退订/到期巡检）、`ReconService`（对账）、`NotifyService`（发件箱）、`UpstreamNotifyService`、`RouteService`、`AppAuthService` |
 | `src/PayOps.Service/Infra` | `RedisStore`、`MqBus`、`ConfigCache`、`NodeService` |
 | `src/PayOps.Service/Jobs` | `DispatchJob`（领取到期任务发 MQ）、`ConsumerJob`（消费） |
 | `src/PayOps.Service/Admin` | 管理端服务与 DTO |
@@ -55,7 +55,7 @@ kubectl kustomize deploy/k8s/overlays/demo        # 校验 K8s 清单可渲染
 
 1. **金额是分（long），时间是 UTC**。SQL 里用 `UTC_TIMESTAMP(3)`，不要用 `NOW()`；C# 用 `DateTime.UtcNow`。
 2. **状态变更只用条件更新**（`UPDATE … WHERE status = 期望值`），用受影响行数判断是否成功。不要"先查再改"。
-3. **支付成功只有一个入口**：`OrderService.HandlePaidAsync`。回调、查单、凭证核验都走它；它负责幂等、金额校验、发件箱、限额计数。
+3. **支付成功只有一个入口**：`OrderService.HandlePaidAsync`。回调、查单、凭证核验都走它；它负责幂等、金额校验、发件箱、限额计数，订阅首购还会在同一事务里建立订阅。唯一的例外是订阅续费单：由上游扣款事件经 `OrderService.RecordRenewalAsync` 直接生成为已支付。
 4. **状态变更与通知任务同一事务**（`NotifyService.InsertTaskAsync` 传入同一个 conn/tx）。提交后再 `EnqueueAsync`。
 5. **后台任务不选主**：领取用 `FOR UPDATE SKIP LOCKED` + 把 `next_*` 字段向后拨作为租约。新增定时任务照此模式，不要加"只允许一个副本运行"的开关。
 6. **MQ 消息只带主键**，数据库是事实来源；处理器必须幂等，可重复、可丢失。
@@ -68,7 +68,7 @@ kubectl kustomize deploy/k8s/overlays/demo        # 校验 K8s 清单可渲染
 
 ## 任务指引
 
-- 新增支付类型、扩展支付方式 → 读 `references/add-provider.md`
+- 新增支付类型、扩展支付方式、给某类型加订阅或对账单能力 → 读 `references/add-provider.md`
 - 新增管理接口/页面、数据库迁移、新增后台任务、改路由规则 → 读 `references/recipes.md`
 - 部署与排障 → 读 `references/ops.md`
 

@@ -1,0 +1,177 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>PayOps · 自用的分布式高可用支付系统</title>
+  <meta name="description" content="PayOps：自用的多应用、多渠道、多通道支付系统。支持微信支付、支付宝、抖音支付与各应用商店内购，含自动续费订阅与对账，原生多副本。">
+  <style>
+    :root { --bg:#f5f7fb; --card:#fff; --ink:#1f2937; --muted:#6b7280; --line:#e5e7eb; --brand:#2563eb; --brand-ink:#1e3a8a; --ok:#059669; }
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body { margin:0; font-family: -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", "Hiragino Sans GB", sans-serif; color:var(--ink); background:var(--bg); line-height:1.7; }
+    a { color:var(--brand); text-decoration:none; } a:hover { text-decoration:underline; }
+    .wrap { max-width:1120px; margin:0 auto; padding:0 24px; }
+    header.nav { position:sticky; top:0; z-index:10; background:rgba(255,255,255,.92); backdrop-filter:blur(8px); border-bottom:1px solid var(--line); }
+    header.nav .wrap { display:flex; align-items:center; gap:24px; height:56px; }
+    .logo { display:flex; align-items:center; gap:10px; font-weight:700; font-size:18px; color:var(--ink); }
+    .logo i { display:inline-grid; place-items:center; width:30px; height:30px; border-radius:8px; background:var(--brand); color:#fff; font-style:normal; font-weight:800; }
+    nav.links { margin-left:auto; display:flex; gap:20px; font-size:14px; }
+    nav.links a { color:var(--muted); } nav.links a:hover { color:var(--brand); text-decoration:none; }
+    .hero { padding:72px 0 48px; text-align:center; background:linear-gradient(180deg,#eef4ff 0%,var(--bg) 100%); }
+    .hero h1 { margin:0 0 12px; font-size:42px; letter-spacing:-.5px; }
+    .hero p.lead { margin:0 auto 24px; max-width:760px; font-size:18px; color:var(--muted); }
+    .chips { display:flex; flex-wrap:wrap; gap:8px; justify-content:center; margin-bottom:28px; }
+    .chip { padding:4px 12px; border-radius:999px; background:#fff; border:1px solid var(--line); font-size:13px; color:var(--brand-ink); }
+    .btn { display:inline-block; padding:10px 22px; border-radius:8px; font-weight:600; font-size:15px; }
+    .btn.primary { background:var(--brand); color:#fff; } .btn.ghost { background:#fff; border:1px solid var(--line); color:var(--ink); margin-left:10px; }
+    .btn:hover { text-decoration:none; filter:brightness(.96); }
+    section { padding:48px 0; }
+    section h2 { margin:0 0 8px; font-size:26px; }
+    section p.sub { margin:0 0 28px; color:var(--muted); }
+    .model { background:var(--card); border:1px solid var(--line); border-radius:14px; padding:24px; overflow-x:auto; }
+    .flow { display:flex; align-items:stretch; gap:10px; min-width:760px; }
+    .node { flex:1; padding:16px; border-radius:12px; background:#f8fafc; border:1px solid var(--line); }
+    .node b { display:block; font-size:16px; } .node span { font-size:13px; color:var(--muted); }
+    .node.key { background:#eff6ff; border-color:#bfdbfe; }
+    .arrow { align-self:center; color:#94a3b8; font-size:22px; }
+    .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(250px,1fr)); gap:16px; }
+    .card { background:var(--card); border:1px solid var(--line); border-radius:14px; padding:20px; }
+    .card h3 { margin:0 0 6px; font-size:16px; } .card p { margin:0; font-size:14px; color:var(--muted); }
+    table { width:100%; border-collapse:collapse; background:var(--card); border:1px solid var(--line); border-radius:14px; overflow:hidden; font-size:14px; }
+    th, td { padding:10px 14px; text-align:left; border-bottom:1px solid var(--line); } th { background:#f8fafc; font-weight:600; }
+    tr:last-child td { border-bottom:none; } td.c { text-align:center; color:var(--ok); font-weight:700; }
+    .shots { display:grid; grid-template-columns:repeat(auto-fit,minmax(480px,1fr)); gap:20px; }
+    figure { margin:0; background:var(--card); border:1px solid var(--line); border-radius:14px; overflow:hidden; }
+    figure a { display:block; background:#eef2f7; }
+    figure img { display:block; width:100%; height:auto; }
+    figcaption { padding:12px 16px; font-size:14px; } figcaption b { display:block; } figcaption span { color:var(--muted); font-size:13px; }
+    pre { margin:0; padding:16px 18px; background:#0f172a; color:#e2e8f0; border-radius:12px; overflow-x:auto; font-size:13px; line-height:1.6; }
+    code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    .two { display:grid; grid-template-columns:repeat(auto-fit,minmax(340px,1fr)); gap:16px; }
+    .note { margin-top:16px; padding:12px 16px; border-left:4px solid #f59e0b; background:#fffbeb; border-radius:8px; font-size:14px; }
+    footer { padding:32px 0 48px; color:var(--muted); font-size:13px; text-align:center; border-top:1px solid var(--line); margin-top:24px; }
+    @media (max-width:560px) { .hero h1 { font-size:30px; } .shots { grid-template-columns:1fr; } nav.links { display:none; } }
+  </style>
+</head>
+<body>
+<header class="nav"><div class="wrap">
+  <a class="logo" href="#"><i>P</i>PayOps</a>
+  <nav class="links">
+    <a href="#model">模型</a><a href="#features">能力</a><a href="#providers">支付类型</a><a href="#screens">后台截图</a><a href="#start">快速开始</a><a href="#docs">文档</a>
+    <a href="https://github.com/cn-cam/PayOps">GitHub</a>
+  </nav>
+</div></header>
+
+<div class="hero"><div class="wrap">
+  <h1>自用的分布式高可用支付系统</h1>
+  <p class="lead">公司自己的多个产品，通过各自的分发渠道，用公司自己名下的多套支付凭证收款。<br>没有商户、费率、结算——只有 应用 → 渠道 → 通道。</p>
+  <div class="chips">
+    <span class="chip">.NET 10</span><span class="chip">Vue 3 + Element Plus</span><span class="chip">MySQL</span><span class="chip">Redis</span><span class="chip">RabbitMQ</span>
+    <span class="chip">单体 / Docker Compose / Kubernetes</span>
+  </div>
+  <a class="btn primary" href="https://github.com/cn-cam/PayOps">查看源码</a><a class="btn ghost" href="#screens">看看管理后台</a>
+</div></div>
+
+<section id="model"><div class="wrap">
+  <h2>多渠道 · 多通道</h2>
+  <p class="sub">渠道决定能用什么支付；一个渠道可以绑定多个通道，同类型通道按权重、起付金额、限额自动分流与容灾。</p>
+  <div class="model"><div class="flow">
+    <div class="node"><b>应用 App</b><span>公司自有的产品</span></div><div class="arrow">→</div>
+    <div class="node"><b>渠道 Channel</b><span>官方包 / 华为 / OPPO / App Store / 小程序…</span></div><div class="arrow">→</div>
+    <div class="node key"><b>绑定 = 路由规则</b><span>权重 · 优先级 · 起付金额 · 单笔上限 · 日限额 · 时段</span></div><div class="arrow">→</div>
+    <div class="node"><b>通道 Passage</b><span>一套自有凭证，如"微信-商户号A"</span></div><div class="arrow">→</div>
+    <div class="node"><b>支付类型</b><span>微信 / 支付宝 / 抖音 / 各商店内购</span></div>
+  </div></div>
+</div></section>
+
+<section id="features"><div class="wrap">
+  <h2>能力</h2>
+  <p class="sub">围绕"钱不能错、服务不能停"设计。</p>
+  <div class="grid">
+    <div class="card"><h3>智能路由与故障转移</h3><p>过滤 → 优先级分组 → 组内加权随机；通道下单失败自动换下一个，连续失败熔断，到期自动恢复。后台可做路由模拟。</p></div>
+    <div class="card"><h3>原生多副本</h3><p>网关、后台、Worker 全部无状态、不选主。任务用 SKIP LOCKED + 租约领取，再经 RabbitMQ 竞争消费，副本可随意增减。</p></div>
+    <div class="card"><h3>入账幂等</h3><p>条件更新只成功一次；上游交易号唯一键防一证多用；回调验签后还要校验订单属于该通道；金额不一致拒绝入账。</p></div>
+    <div class="card"><h3>事务发件箱</h3><p>订单状态与业务通知同事务写入，至少一次投递，9 档退避重试；同时发布 MQ 领域事件供内部系统订阅。</p></div>
+    <div class="card"><h3>自动续费订阅</h3><p>华为 / 荣耀 / 苹果：首购、续订、退订、恢复、到期、撤销全链路。每期扣款一笔独立订单，到期巡检兜底。</p></div>
+    <div class="card"><h3>对账</h3><p>每日下载微信 / 支付宝 / 抖音支付账单，与本地支付、退款逐笔勾对；差异分三类，人工处理留痕。</p></div>
+    <div class="card"><h3>掉单补偿</h3><p>待支付订单递进式主动查单；超时关单前先查上游；关单后迟到的成功回调仍会入账。</p></div>
+    <div class="card"><h3>安全</h3><p>接入方 HMAC 签名 + 防重放；通道凭证 AES-256-GCM 落库加密；后台三级角色与操作审计。</p></div>
+  </div>
+</div></section>
+
+<section id="providers"><div class="wrap">
+  <h2>支付类型</h2>
+  <p class="sub">新增一种支付类型只需实现一个接口并注册一行，后台表单与路由自动生效。</p>
+  <table>
+    <tr><th>类型</th><th>支付方式</th><th>查单</th><th>退款</th><th>订阅</th><th>对账</th></tr>
+    <tr><td>微信支付</td><td>APP / JSAPI·小程序 / 扫码 / H5</td><td class="c">✓</td><td class="c">✓</td><td></td><td class="c">✓</td></tr>
+    <tr><td>支付宝</td><td>APP / 手机网站 / 电脑网站 / 扫码</td><td class="c">✓</td><td class="c">✓</td><td></td><td class="c">✓</td></tr>
+    <tr><td>抖音支付</td><td>APP / H5 / PC 扫码</td><td class="c">✓</td><td class="c">✓</td><td></td><td class="c">✓</td></tr>
+    <tr><td>抖音小程序</td><td>担保支付</td><td class="c">✓</td><td class="c">✓</td><td></td><td></td></tr>
+    <tr><td>华为应用内支付</td><td>IAP</td><td></td><td></td><td class="c">✓</td><td></td></tr>
+    <tr><td>荣耀应用内支付</td><td>IAP</td><td></td><td></td><td class="c">✓</td><td></td></tr>
+    <tr><td>苹果应用内购买</td><td>StoreKit 2</td><td></td><td></td><td class="c">✓</td><td></td></tr>
+    <tr><td>OPPO / vivo / 小米</td><td>联运 SDK 支付</td><td>vivo·小米</td><td></td><td></td><td></td></tr>
+  </table>
+  <div class="note">各真实支付类型按官方文档实现并有验签/解析单元测试，但尚未使用真实商户凭证联调。上线前请逐个通道走通真实交易。</div>
+</div></section>
+
+<section id="screens"><div class="wrap">
+  <h2>管理后台</h2>
+  <p class="sub">以下截图来自 Docker Compose 多副本部署（2 个 api + 2 个 worker）上实际运行的后台。交易数据由演示脚本通过模拟通道产生（为展示对账，部分演示订单的时间被调到了前一天）；微信、支付宝等通道为未配置真实凭证的示例。点击可看大图。</p>
+  <div class="shots">
+    <figure><a href="assets/screenshots/dashboard.png"><img src="assets/screenshots/dashboard.png" alt="仪表盘" loading="lazy"></a><figcaption><b>仪表盘</b><span>今日交易、成功率、趋势与分布；待通知、处理中退款、生效中订阅、待处理对账差异</span></figcaption></figure>
+    <figure><a href="assets/screenshots/cluster.png"><img src="assets/screenshots/cluster.png" alt="集群节点" loading="lazy"></a><figcaption><b>集群节点</b><span>在线副本、角色与节点号，以及 MySQL / Redis / RabbitMQ 连通性</span></figcaption></figure>
+    <figure><a href="assets/screenshots/bindings.png"><img src="assets/screenshots/bindings.png" alt="渠道通道配置" loading="lazy"></a><figcaption><b>渠道通道配置</b><span>同一渠道绑定多个同类型通道：权重占比、起付金额、限额、熔断状态与路由模拟</span></figcaption></figure>
+    <figure><a href="assets/screenshots/passages.png"><img src="assets/screenshots/passages.png" alt="通道管理" loading="lazy"></a><figcaption><b>通道管理</b><span>每个通道是一套自有凭证；配置表单由后端元数据动态生成，密钥加密存储</span></figcaption></figure>
+    <figure><a href="assets/screenshots/orders.png"><img src="assets/screenshots/orders.png" alt="订单管理" loading="lazy"></a><figcaption><b>订单管理</b><span>按应用、渠道、通道、类型检索；补单、关单、退款、重发通知</span></figcaption></figure>
+    <figure><a href="assets/screenshots/test-order.png"><img src="assets/screenshots/test-order.png" alt="测试下单" loading="lazy"></a><figcaption><b>测试下单</b><span>端到端验证"渠道 → 路由规则 → 通道"，可直接模拟支付成功</span></figcaption></figure>
+    <figure><a href="assets/screenshots/subscriptions.png"><img src="assets/screenshots/subscriptions.png" alt="订阅管理" loading="lazy"></a><figcaption><b>订阅管理</b><span>自动续费订阅的状态、续订开关与当前周期</span></figcaption></figure>
+    <figure><a href="assets/screenshots/subscription-detail.png"><img src="assets/screenshots/subscription-detail.png" alt="订阅详情" loading="lazy"></a><figcaption><b>订阅详情</b><span>首购单与各期续费单；同步、退订，模拟通道可模拟续费 / 退订 / 到期</span></figcaption></figure>
+    <figure><a href="assets/screenshots/recon.png"><img src="assets/screenshots/recon.png" alt="对账批次" loading="lazy"></a><figcaption><b>对账批次</b><span>每通道每天一个批次，上游账单与本地记录的笔数、金额对比</span></figcaption></figure>
+    <figure><a href="assets/screenshots/recon-diffs.png"><img src="assets/screenshots/recon-diffs.png" alt="对账差异" loading="lazy"></a><figcaption><b>对账差异</b><span>上游有本地无、本地有上游无、金额不一致三类差异，逐条处理并留痕</span></figcaption></figure>
+  </div>
+</div></section>
+
+<section id="start"><div class="wrap">
+  <h2>快速开始</h2>
+  <p class="sub">同一份代码、同一个镜像，三种部署形态。</p>
+  <div class="two">
+    <div><h3>本地开发</h3><pre><code># 复制 appsettings.Local.example.json 为 appsettings.Local.json 并填写中间件账号
+dotnet run --project src/PayOps.Server   # http://localhost:5080
+cd web/admin &amp;&amp; npm install &amp;&amp; npm run dev   # http://localhost:5175
+pwsh scripts/demo.ps1                    # 端到端演示</code></pre></div>
+    <div><h3>Docker Compose（多副本）</h3><pre><code>cd deploy/compose
+cp .env.example .env        # 修改口令与密钥
+docker compose up -d --build
+# 管理后台 http://localhost:8090   账号 admin
+docker compose up -d --scale api=4 --scale worker=3</code></pre></div>
+    <div><h3>Kubernetes</h3><pre><code>kubectl apply -k deploy/k8s/overlays/demo   # 自带演示中间件
+# 生产：填写 overlays/prod/secret.env 后
+kubectl apply -k deploy/k8s/overlays/prod</code></pre></div>
+    <div><h3>业务接入</h3><pre><code>POST /api/pay/orders
+X-App-Id / X-Timestamp / X-Nonce / X-Sign (HMAC-SHA256)
+
+{ "channel": "official", "payMethod": "wechat_app",
+  "mchOrderNo": "B20261127001", "amount": 600,
+  "subject": "金币 x60" }</code></pre></div>
+  </div>
+</div></section>
+
+<section id="docs"><div class="wrap">
+  <h2>文档</h2>
+  <p class="sub">设计与使用文档都在仓库的 <code>docs/</code> 目录。</p>
+  <div class="grid">
+    <div class="card"><h3><a href="https://github.com/cn-cam/PayOps/blob/main/docs/01-总体设计.md">总体设计</a></h3><p>需求理解、路由算法、架构、多副本与高可用机制、订阅与对账</p></div>
+    <div class="card"><h3><a href="https://github.com/cn-cam/PayOps/blob/main/docs/02-数据库设计.md">数据库设计</a></h3><p>库表、索引、状态机</p></div>
+    <div class="card"><h3><a href="https://github.com/cn-cam/PayOps/blob/main/docs/03-业务接入API.md">业务接入 API</a></h3><p>下单、查询、退款、凭证核验、订阅、签名与业务通知</p></div>
+    <div class="card"><h3><a href="https://github.com/cn-cam/PayOps/blob/main/docs/04-管理后台API.md">管理后台 API</a></h3><p>前后端契约</p></div>
+    <div class="card"><h3><a href="https://github.com/cn-cam/PayOps/blob/main/docs/05-部署手册.md">部署手册</a></h3><p>单体 / Compose / K8s、配置项、上线检查清单</p></div>
+    <div class="card"><h3><a href="https://github.com/cn-cam/PayOps/blob/main/docs/06-通道接入指南.md">通道接入指南</a></h3><p>各支付类型的凭证、回调配置、客户端配合点与验证状态</p></div>
+  </div>
+</div></section>
+
+<footer><div class="wrap">PayOps · <a href="https://github.com/cn-cam/PayOps">github.com/cn-cam/PayOps</a></div></footer>
+</body>
+</html>

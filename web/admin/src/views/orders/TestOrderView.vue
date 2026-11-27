@@ -1,20 +1,20 @@
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { CircleCheckFilled, Promotion, Refresh } from '@element-plus/icons-vue'
 import { ElMessage, type FormInstance, type FormRules } from 'element-plus'
 import { bindingsApi } from '@/api/bindings'
 import { channelsApi } from '@/api/channels'
 import { ordersApi } from '@/api/orders'
-import type { BindingItem, ChannelBrief, OrderStatus, TestOrderResult } from '@/api/types'
+import type { BindingItem, ChannelBrief, OrderStatus, OrderType, TestOrderResult } from '@/api/types'
 import { useMetaStore } from '@/stores/meta'
 import AppSelect from '@/components/AppSelect.vue'
 import EnumTag from '@/components/EnumTag.vue'
 import JsonViewer from '@/components/JsonViewer.vue'
 import MoneyInput from '@/components/MoneyInput.vue'
-import OrderDetailDrawer from '@/components/OrderDetailDrawer.vue'
+import DetailDrawers from '@/components/DetailDrawers.vue'
 import { validateForm } from '@/utils/common'
-import { ORDER_STATUS } from '@/utils/enums'
+import { ORDER_STATUS, ORDER_TYPE } from '@/utils/enums'
 import { formatMoney } from '@/utils/money'
 import { formatTime } from '@/utils/time'
 
@@ -32,6 +32,7 @@ const form = reactive({
   productId: '',
   openId: '',
   userId: '',
+  subscribe: false,
 })
 
 const rules: FormRules = {
@@ -109,6 +110,15 @@ const methodNotBound = computed(
   () => !!form.payMethod && !!selectedChannel.value && !!methodProvider.value && !boundProviders.value.has(methodProvider.value),
 )
 
+/** 只有所选支付方式对应的支付类型支持自动续费时，才能下订阅单 */
+const subscriptionSupported = computed(
+  () => !!meta.getProvider(methodProvider.value)?.capabilities?.subscription,
+)
+
+watch(subscriptionSupported, (supported) => {
+  if (!supported) form.subscribe = false
+})
+
 onMounted(() => meta.loadProviders())
 
 // ---------- 下单 ----------
@@ -120,11 +130,15 @@ interface HistoryEntry {
   provider: string
   passageName: string
   status: OrderStatus
+  orderType: OrderType
+  /** 订阅首购单支付成功后才会有 */
+  subNo: string | null
 }
 
 const result = ref<TestOrderResult | null>(null)
 const currentStatus = ref<OrderStatus>(0)
 const currentPaidAt = ref<string | null>(null)
+const currentSubNo = ref<string | null>(null)
 const history = ref<HistoryEntry[]>([])
 
 async function submit() {
@@ -140,10 +154,12 @@ async function submit() {
       productId: form.productId.trim(),
       openId: form.openId.trim(),
       userId: form.userId.trim(),
+      subscribe: subscriptionSupported.value && form.subscribe,
     })
     result.value = res
     currentStatus.value = res.status
     currentPaidAt.value = null
+    currentSubNo.value = null
     history.value.unshift({
       orderNo: res.orderNo,
       time: new Date(),
@@ -152,6 +168,8 @@ async function submit() {
       provider: res.provider,
       passageName: res.passageName,
       status: res.status,
+      orderType: res.orderType ?? 0,
+      subNo: null,
     })
     ElMessage.success(`下单成功，已路由到「${res.passageName}」`)
   } finally {
@@ -159,10 +177,16 @@ async function submit() {
   }
 }
 
-function setStatus(orderNo: string, status: OrderStatus) {
+function setStatus(orderNo: string, status: OrderStatus, subNo: string | null) {
   const entry = history.value.find((h) => h.orderNo === orderNo)
-  if (entry) entry.status = status
-  if (result.value?.orderNo === orderNo) currentStatus.value = status
+  if (entry) {
+    entry.status = status
+    entry.subNo = subNo
+  }
+  if (result.value?.orderNo === orderNo) {
+    currentStatus.value = status
+    currentSubNo.value = subNo
+  }
 }
 
 const refreshing = ref(false)
@@ -171,9 +195,10 @@ async function refreshStatus(orderNo: string, silent = false) {
   refreshing.value = true
   try {
     const detail = await ordersApi.get(orderNo)
-    setStatus(orderNo, detail.status)
+    setStatus(orderNo, detail.status, detail.subNo ?? null)
     if (result.value?.orderNo === orderNo) currentPaidAt.value = detail.paidAt
     if (!silent) ElMessage.success('订单状态已刷新')
+    return detail
   } finally {
     refreshing.value = false
   }
@@ -187,8 +212,14 @@ async function mockPay() {
   mockPaying.value = true
   try {
     await ordersApi.mockPay(orderNo)
-    ElMessage.success('已模拟上游支付成功回调')
-    await refreshStatus(orderNo, true)
+    const detail = await refreshStatus(orderNo, true)
+    if (detail.orderType === 1 && detail.subNo) {
+      ElMessage.success(`已模拟支付成功，订阅 ${detail.subNo} 已创建`)
+    } else if (detail.orderType === 1) {
+      ElMessage.success('已模拟支付成功；订阅号尚未返回，稍后点「刷新状态」查看')
+    } else {
+      ElMessage.success('已模拟上游支付成功回调')
+    }
   } finally {
     mockPaying.value = false
   }
@@ -205,16 +236,23 @@ const routeStats = computed(() => {
 })
 
 // ---------- 详情 ----------
-const detailVisible = ref(false)
-const detailOrderNo = ref('')
+const drawers = ref<InstanceType<typeof DetailDrawers>>()
 
 function openDetail(orderNo: string) {
-  detailOrderNo.value = orderNo
-  detailVisible.value = true
+  drawers.value?.openOrder(orderNo)
 }
 
-function onDetailChanged() {
-  if (detailOrderNo.value) refreshStatus(detailOrderNo.value, true)
+function openSubscription(subNo: string | null) {
+  drawers.value?.openSubscription(subNo)
+}
+
+function onDetailChanged(target: { kind: 'order' | 'subscription'; no: string }) {
+  if (target.kind === 'order') {
+    if (history.value.some((h) => h.orderNo === target.no)) refreshStatus(target.no, true)
+  } else if (result.value) {
+    // 订阅侧的操作（如模拟续费、撤销）可能影响当前订单
+    refreshStatus(result.value.orderNo, true)
+  }
 }
 
 function goBindings() {
@@ -284,6 +322,23 @@ function goBindings() {
                 所选渠道没有绑定支持该支付方式的通道，下单大概率失败。
               </div>
             </el-form-item>
+            <el-form-item label="订阅" prop="subscribe">
+              <el-switch
+                v-model="form.subscribe"
+                :disabled="!subscriptionSupported"
+                active-text="订阅（自动续费）"
+                inactive-text="一次性支付"
+              />
+              <div class="form-help">
+                <template v-if="subscriptionSupported">
+                  打开后下的是「订阅首购」单：支付成功会创建一个订阅，之后每期续费由上游扣款事件生成续费单。
+                </template>
+                <template v-else-if="form.payMethod">
+                  「{{ meta.providerName(methodProvider) }}」不支持自动续费订阅，只能下一次性支付单。
+                </template>
+                <template v-else>选择支持自动续费的支付方式后可用。</template>
+              </div>
+            </el-form-item>
             <el-form-item label="金额" prop="amount">
               <MoneyInput v-model="form.amount" />
               <div class="form-help">可以换不同金额多下几单，观察起付金额 / 单笔上限与权重分流是否生效。</div>
@@ -316,6 +371,9 @@ function goBindings() {
             <div v-if="result" class="toolbar__actions">
               <el-button :icon="Refresh" :loading="refreshing" @click="refreshStatus(result.orderNo)">刷新状态</el-button>
               <el-button @click="openDetail(result.orderNo)">订单详情</el-button>
+              <el-button v-if="currentSubNo" type="primary" plain @click="openSubscription(currentSubNo)">
+                查看订阅
+              </el-button>
               <el-button
                 v-if="result.provider === 'mock' && currentStatus === 0"
                 type="success"
@@ -337,9 +395,36 @@ function goBindings() {
                 <div class="route-banner__name">{{ result.passageName }}</div>
               </div>
               <div class="route-banner__status">
+                <EnumTag
+                  v-if="result.orderType"
+                  :options="ORDER_TYPE"
+                  :value="result.orderType"
+                  effect="plain"
+                  size="large"
+                />
                 <EnumTag :options="ORDER_STATUS" :value="currentStatus" effect="dark" size="large" />
               </div>
             </div>
+
+            <el-alert
+              v-if="result.orderType === 1"
+              :type="currentSubNo ? 'success' : 'info'"
+              show-icon
+              :closable="false"
+              class="block"
+            >
+              <template v-if="currentSubNo">
+                订阅已创建：
+                <el-link type="primary" underline="never" class="mono" @click="openSubscription(currentSubNo)">
+                  {{ currentSubNo }}
+                </el-link>
+                。演示通道可以在订阅详情里用「模拟事件」体验续费、退订、到期、撤销。
+              </template>
+              <template v-else-if="currentStatus === 0">
+                这是一笔订阅首购单，支付成功后会自动创建订阅{{ result.provider === 'mock' ? '；点右上角「模拟支付成功」即可' : '' }}。
+              </template>
+              <template v-else>这是一笔订阅首购单；订阅号尚未返回，可点「刷新状态」重试。</template>
+            </el-alert>
 
             <el-descriptions :column="2" border size="small" class="block">
               <el-descriptions-item label="订单号">
@@ -370,6 +455,21 @@ function goBindings() {
                 <span class="text-secondary text-small">（ID {{ result.passageId }}）</span>
               </el-descriptions-item>
               <el-descriptions-item label="过期时间">{{ formatTime(result.expireAt) }}</el-descriptions-item>
+              <el-descriptions-item label="订单类型">
+                <EnumTag :options="ORDER_TYPE" :value="result.orderType ?? 0" size="small" effect="plain" />
+              </el-descriptions-item>
+              <el-descriptions-item label="订阅号">
+                <el-link
+                  v-if="currentSubNo"
+                  type="primary"
+                  underline="never"
+                  class="mono"
+                  @click="openSubscription(currentSubNo)"
+                >
+                  {{ currentSubNo }}
+                </el-link>
+                <span v-else class="text-secondary">{{ result.orderType === 1 ? '支付成功后生成' : '-' }}</span>
+              </el-descriptions-item>
               <el-descriptions-item label="凭据类型" :span="2">
                 <el-tag effect="plain">{{ result.credential?.type || '-' }}</el-tag>
               </el-descriptions-item>
@@ -421,6 +521,20 @@ function goBindings() {
             <span class="passage-name">{{ row.passageName }}</span>
           </template>
         </el-table-column>
+        <el-table-column label="类型 / 订阅号" min-width="200">
+          <template #default="{ row }">
+            <EnumTag :options="ORDER_TYPE" :value="row.orderType ?? 0" size="small" effect="plain" />
+            <el-link
+              v-if="row.subNo"
+              type="primary"
+              underline="never"
+              class="mono history-sub"
+              @click="openSubscription(row.subNo)"
+            >
+              {{ row.subNo }}
+            </el-link>
+          </template>
+        </el-table-column>
         <el-table-column label="状态" width="110" align="center">
           <template #default="{ row }">
             <EnumTag :options="ORDER_STATUS" :value="row.status" size="small" />
@@ -434,7 +548,7 @@ function goBindings() {
       </el-table>
     </el-card>
 
-    <OrderDetailDrawer v-model="detailVisible" :order-no="detailOrderNo" @changed="onDetailChanged" />
+    <DetailDrawers ref="drawers" @changed="onDetailChanged" />
   </div>
 </template>
 
@@ -485,7 +599,14 @@ function goBindings() {
   font-weight: 700;
 }
 .route-banner__status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   margin-left: auto;
+}
+.history-sub {
+  margin-left: 8px;
+  font-size: 12px;
 }
 .block {
   margin-bottom: 16px;

@@ -29,6 +29,7 @@ public sealed class UpstreamNotifyService(
     ConfigCache cache,
     OrderService orders,
     RefundService refunds,
+    SubscriptionService subscriptions,
     IPayProviderRegistry providers,
     ILogger<UpstreamNotifyService> logger)
 {
@@ -91,6 +92,7 @@ public sealed class UpstreamNotifyService(
                     NotifyEventType.Refund => await refunds.HandleUpstreamEventAsync(e, provider.Meta.Code, req.PassageId)
                         ? (NotifyOutcome.Success, "退款事件已处理")
                         : (NotifyOutcome.OrderNotFound, "退款事件找不到对应单据"),
+                    NotifyEventType.Subscription => await subscriptions.HandleEventAsync(e, provider.Meta.Code, req.PassageId),
                     _ => (NotifyOutcome.Success, e.Message.Length > 0 ? e.Message : "忽略"),
                 };
             }
@@ -120,7 +122,7 @@ public sealed class UpstreamNotifyService(
         if (!string.IsNullOrEmpty(e.ProductId) && order.ProductId.Length > 0 && e.ProductId != order.ProductId)
             return (NotifyOutcome.AmountMismatch, "商品与订单不一致");
 
-        var outcome = await orders.HandlePaidAsync(order, new PaidInfo(e.UpstreamTradeNo, e.Amount, e.PaidAt, e.BuyerId), "notify");
+        var outcome = await orders.HandlePaidAsync(order, new PaidInfo(e.UpstreamTradeNo, e.Amount, e.PaidAt, e.BuyerId, e.Subscription), "notify");
         return outcome switch
         {
             PaidOutcome.Success => (NotifyOutcome.Success, "支付成功已入账"),

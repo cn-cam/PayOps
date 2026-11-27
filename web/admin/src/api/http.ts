@@ -2,7 +2,19 @@ import axios, { type AxiosRequestConfig, type AxiosResponse } from 'axios'
 import { ElMessage } from 'element-plus'
 import type { ApiEnvelope } from './types'
 
-/** 请求失败时抛出的错误；handled = true 表示已经向用户提示过，调用方无需再提示 */
+declare module 'axios' {
+  interface AxiosRequestConfig {
+    /** true 时不弹统一的错误轻提示，由调用方自行展示 HttpError.message */
+    silent?: boolean
+  }
+}
+
+export interface RequestOptions {
+  /** 不弹统一的错误轻提示（调用方需要自己 catch 并展示） */
+  silent?: boolean
+}
+
+/** 请求失败时抛出的错误；handled = true 表示已经向用户提示过（或由调用方负责提示），全局无需再处理 */
 export class HttpError extends Error {
   readonly handled = true
   constructor(
@@ -48,13 +60,14 @@ instance.interceptors.request.use((config) => {
 instance.interceptors.response.use(
   (res: AxiosResponse<ApiEnvelope>) => {
     const body = res.data
+    const silent = res.config.silent === true
     if (!body || typeof body !== 'object' || typeof body.code !== 'number') {
-      toastError('响应格式错误')
+      if (!silent) toastError('响应格式错误')
       return Promise.reject(new HttpError('响应格式错误', -1, res.status))
     }
     if (body.code !== 0) {
       const message = body.message || '操作失败'
-      toastError(message)
+      if (!silent) toastError(message)
       return Promise.reject(new HttpError(message, body.code, res.status))
     }
     return res
@@ -89,7 +102,8 @@ instance.interceptors.response.use(
       message = serverMessage || `请求失败（${status}）`
     }
 
-    toastError(message)
+    // 登录失效一定要提示；其余错误尊重 silent
+    if (status === 401 || error.config?.silent !== true) toastError(message)
     return Promise.reject(new HttpError(message, body?.code ?? -1, status))
   },
 )
@@ -114,8 +128,8 @@ export const http = {
   get<T>(url: string, params?: object): Promise<T> {
     return request<T>({ method: 'GET', url, params: cleanParams(params) })
   },
-  post<T>(url: string, data?: unknown): Promise<T> {
-    return request<T>({ method: 'POST', url, data: data ?? {} })
+  post<T>(url: string, data?: unknown, options?: RequestOptions): Promise<T> {
+    return request<T>({ method: 'POST', url, data: data ?? {}, silent: options?.silent })
   },
   put<T>(url: string, data?: unknown): Promise<T> {
     return request<T>({ method: 'PUT', url, data: data ?? {} })

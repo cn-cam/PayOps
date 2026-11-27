@@ -13,3 +13,4 @@ deploy/compose/.env
 deploy/compose/.env.dev
 deploy/k8s/overlays/prod/secret.env
 appsettings.Production.json
+appsettings.Local.json

@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 # 构建上下文为仓库根目录：
-#   docker build -f deploy/docker/Dockerfile -t payops:1.0.0 .
+#   docker build -f deploy/docker/Dockerfile -t payops:1.1.0 .
 # 同一个镜像通过 PayOps__Roles 环境变量决定角色（All / Gateway / Admin / Worker 任意组合）。
 
 ARG NODE_IMAGE=node:24-alpine

@@ -23,7 +23,7 @@ public sealed class WechatProvider(IHttpClientFactory httpFactory) : PayProvider
             new("wechat_native", "微信扫码支付"),
             new("wechat_h5", "微信H5支付"),
         ],
-        Capabilities = new() { Query = true, Close = true, Refund = true },
+        Capabilities = new() { Query = true, Close = true, Refund = true, Bill = true },
         ConfigFields =
         [
             new() { Key = "appId", Label = "AppID", Required = true, Placeholder = "wx...", Help = "与商户号绑定的开放平台/公众号/小程序 AppID" },
@@ -253,6 +253,79 @@ public sealed class WechatProvider(IHttpClientFactory httpFactory) : PayProvider
             PaidAt = q.PaidAt,
             BuyerId = q.BuyerId,
         }));
+    }
+
+    // ------------------------------------------------------------------ 账单
+
+    /// <summary>申请交易账单（bill_type=ALL，明文）并下载解析。下载地址 5 分钟有效，下载请求同样需要签名。</summary>
+    public override async Task<List<BillItem>> DownloadBillAsync(BillContext ctx, CancellationToken ct)
+    {
+        var cfg = ctx.Config;
+        var (status, text) = await CallAsync(cfg, HttpMethod.Get, $"/v3/bill/tradebill?bill_date={ctx.BillDate:yyyy-MM-dd}&bill_type=ALL", "", ct);
+        var json = ParseJson(text, Meta.Name);
+        if (status is < 200 or >= 300)
+        {
+            // 当日无交易与退款
+            if (json.Str("code") == "NO_STATEMENT_EXIST") return [];
+            throw Upstream(json.Str("code"), $"申请微信交易账单失败：{json.Str("message")}");
+        }
+
+        var url = new Uri(json.Str("download_url"));
+        var auth = BuildAuthorization(cfg.Require("mchId"), cfg.Require("serialNo"), cfg.Require("privateKey"),
+            "GET", url.PathAndQuery, "", DateTimeOffset.UtcNow.ToUnixTimeSeconds().ToString(), Guid.NewGuid().ToString("N"));
+        using var req = new HttpRequestMessage(HttpMethod.Get, url);
+        req.Headers.TryAddWithoutValidation("Authorization", "WECHATPAY2-SHA256-RSA2048 " + auth);
+        req.Headers.TryAddWithoutValidation("Accept", "application/json");
+        req.Headers.TryAddWithoutValidation("User-Agent", "PayOps/1.0");
+        byte[] bytes;
+        try
+        {
+            using var resp = await Http.SendAsync(req, ct);
+            bytes = await resp.Content.ReadAsByteArrayAsync(ct);
+            if (!resp.IsSuccessStatusCode)
+                throw Upstream("BILL_DOWNLOAD", $"下载微信账单失败：HTTP {(int)resp.StatusCode} {Truncate(Encoding.UTF8.GetString(bytes), 200)}");
+        }
+        catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException or IOException)
+        {
+            if (ct.IsCancellationRequested) throw;
+            throw new ProviderException("UPSTREAM_UNREACHABLE", $"下载微信账单网络异常：{ex.Message}", inner: ex);
+        }
+        return ParseBill(BillCsv.Decode(BillCsv.Gunzip(bytes)));
+    }
+
+    /// <summary>解析 ALL 类型交易账单（按表头名取列，兼容新旧版列名）。SUCCESS 为支付行，REFUND 为退款行；金额单位元。</summary>
+    public static List<BillItem> ParseBill(string csv)
+    {
+        var items = new List<BillItem>();
+        foreach (var row in BillCsv.Rows(csv, ["商户订单号", "交易状态"], stopFirstField: "总交易单数"))
+        {
+            switch (row["交易状态"])
+            {
+                case "SUCCESS":
+                    items.Add(new BillItem
+                    {
+                        Kind = BillItemKind.Pay,
+                        OrderNo = row["商户订单号"],
+                        UpstreamTradeNo = row.GetValueOrDefault("微信订单号", ""),
+                        // 新版为"订单金额"，旧版商户账单为"总金额"
+                        Amount = BillCsv.Fen(row.GetValueOrDefault("订单金额") ?? row.GetValueOrDefault("总金额", "0")),
+                    });
+                    break;
+                case "REFUND":
+                    // 退款状态是出账时的快照：仅成功的退款参与对账
+                    if (row.GetValueOrDefault("退款状态", "") is not ("" or "SUCCESS")) break;
+                    items.Add(new BillItem
+                    {
+                        Kind = BillItemKind.Refund,
+                        OrderNo = row["商户订单号"],
+                        UpstreamTradeNo = row.GetValueOrDefault("微信退款单号", ""),
+                        RefundNo = row.GetValueOrDefault("商户退款单号", ""),
+                        Amount = BillCsv.Fen(row.GetValueOrDefault("退款金额", "0")),
+                    });
+                    break;
+            }
+        }
+        return items;
     }
 
     public override NotifyReply BuildReply(NotifyOutcome outcome, string message) =>

@@ -22,6 +22,7 @@ public sealed class TestOrderRequest
     public string? ProductId { get; set; }
     public string? OpenId { get; set; }
     public string? UserId { get; set; }
+    public bool Subscribe { get; set; }
 }
 
 [Route("api/admin/orders")]
@@ -104,12 +105,24 @@ public sealed class OrdersController(
             Headers = new Dictionary<string, string>(),
             Query = new Dictionary<string, string>(),
             Form = new Dictionary<string, string>(),
-            Body = MockProvider.BuildCallbackBody(passage.Config.Require("secret"), order.OrderNo, order.Amount),
+            Body = MockCallbackBody(order, passage.Config.Require("secret")),
             ClientIp = HttpContext.ClientIp(),
         }, ct);
         if (reply.StatusCode != 200) throw new PayException(ErrorCodes.PassageError, "模拟回调处理失败：" + reply.Body);
         await AuditAsync("模拟支付", orderNo);
         return Done();
+    }
+
+    /// <summary>订阅首购订单要回放下单凭据里那份带订阅信息的回调；一次性订单直接构造即可。</summary>
+    private static string MockCallbackBody(PayOrder order, string secret)
+    {
+        if (order.OrderType == OrderType.SubscriptionInitial && !string.IsNullOrEmpty(order.Credential))
+        {
+            using var doc = System.Text.Json.JsonDocument.Parse(order.Credential);
+            if (doc.RootElement.TryGetProperty("data", out var data) && data.TryGetProperty("body", out var body) && body.GetString() is { Length: > 0 } stored)
+                return stored;
+        }
+        return MockProvider.BuildCallbackBody(secret, order.OrderNo, order.Amount);
     }
 
     /// <summary>后台测试下单：跳过接入签名，直接走真实的路由与下单流程。</summary>
@@ -128,6 +141,7 @@ public sealed class OrdersController(
             ProductId = request.ProductId ?? "",
             OpenId = request.OpenId ?? "",
             UserId = request.UserId ?? "",
+            Subscribe = request.Subscribe,
             ClientIp = HttpContext.ClientIp(),
         }, ct);
         await AuditAsync("测试下单", result.OrderNo, new { request.ChannelCode, request.PayMethod, request.Amount, result.PassageName });

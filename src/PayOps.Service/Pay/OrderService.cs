@@ -31,6 +31,8 @@ public sealed class CreateOrderRequest
     public string ReturnUrl { get; set; } = "";
     public string Attach { get; set; } = "";
     public int ExpireSeconds { get; set; }
+    /// <summary>自动续费订阅首购：仅支持订阅的支付类型可用（应用商店内购）。</summary>
+    public bool Subscribe { get; set; }
     public Dictionary<string, string>? Extra { get; set; }
 }
 
@@ -42,13 +44,20 @@ public sealed class OrderResult
     public long Amount { get; set; }
     public string Provider { get; set; } = "";
     public string PayMethod { get; set; } = "";
+    public int OrderType { get; set; }
     public long PassageId { get; set; }
     public string PassageName { get; set; } = "";
     public DateTime ExpireAt { get; set; }
     public JsonElement? Credential { get; set; }
 }
 
-public sealed record PaidInfo(string? UpstreamTradeNo, long? Amount, DateTime? PaidAt, string BuyerId);
+/// <param name="Subscription">非空表示这笔成功扣款属于自动续费订阅（首购），入账时同时建立订阅。</param>
+public sealed record PaidInfo(string? UpstreamTradeNo, long? Amount, DateTime? PaidAt, string BuyerId, SubscriptionInfo? Subscription = null);
+
+/// <summary>一次订阅续费扣款。</summary>
+public sealed record RenewalCharge(string TradeNo, long? Amount, DateTime? PaidAt, DateTime? PeriodStart, DateTime? ExpiresAt, string BuyerId, string Token);
+
+public enum RenewalOutcome { Renewed, Duplicate, Invalid }
 
 public enum PaidOutcome { Success, AlreadyPaid, OrderNotFound, AmountMismatch, TradeReused, Conflict }
 
@@ -94,6 +103,8 @@ public sealed class OrderService(
         Validate(req);
         var provider = providers.FindByMethod(req.PayMethod)
                        ?? throw new PayException(ErrorCodes.InvalidParam, $"不支持的支付方式：{req.PayMethod}");
+        if (req.Subscribe && !provider.Meta.Capabilities.Subscription)
+            throw new PayException(ErrorCodes.NotSupported, $"{provider.Meta.Name}不支持自动续费订阅");
         var channel = await cache.GetChannelAsync(app.Id, req.Channel);
         if (channel is null || channel.Status != 1)
             throw new PayException(ErrorCodes.ChannelNotFound, $"渠道不存在或已停用：{req.Channel}");
@@ -119,6 +130,7 @@ public sealed class OrderService(
             ChannelCode = channel.Code,
             Provider = provider.Meta.Code,
             PayMethod = req.PayMethod,
+            OrderType = req.Subscribe ? OrderType.SubscriptionInitial : OrderType.OneTime,
             Subject = req.Subject,
             Body = req.Body,
             Amount = req.Amount,
@@ -144,7 +156,7 @@ public sealed class OrderService(
             await db.ExecuteAsync(
                 """
                 UPDATE pay_order SET order_no=@OrderNo, channel_id=@ChannelId, channel_code=@ChannelCode, passage_id=0, binding_id=0,
-                  provider=@Provider, pay_method=@PayMethod, subject=@Subject, body=@Body, amount=@Amount, currency=@Currency, status=0,
+                  provider=@Provider, pay_method=@PayMethod, order_type=@OrderType, sub_no='', subject=@Subject, body=@Body, amount=@Amount, currency=@Currency, status=0,
                   user_id=@UserId, buyer_id=@BuyerId, product_id=@ProductId, client_ip=@ClientIp, notify_url=@NotifyUrl, return_url=@ReturnUrl,
                   attach=@Attach, credential=NULL, error_code='', error_msg='', expire_at=@ExpireAt, next_check_at=@NextCheckAt,
                   check_count=0, created_at=@CreatedAt, updated_at=@UpdatedAt
@@ -195,6 +207,7 @@ public sealed class OrderService(
                     ReturnUrl = order.ReturnUrl,
                     NotifyUrl = UpstreamNotifyUrl(provider.Meta.Code, candidate.PassageId),
                     ExpireAt = order.ExpireAt,
+                    Subscribe = order.OrderType == OrderType.SubscriptionInitial,
                     Extra = req.Extra ?? [],
                 }, ct);
 
@@ -241,7 +254,8 @@ public sealed class OrderService(
             case OrderStatus.Closed:
                 throw new PayException(ErrorCodes.OrderExists, "该业务订单号已关闭，请更换 mchOrderNo 重新下单");
         }
-        var same = existing.Amount == req.Amount && existing.PayMethod == req.PayMethod && existing.ChannelId == channel.Id;
+        var same = existing.Amount == req.Amount && existing.PayMethod == req.PayMethod && existing.ChannelId == channel.Id
+                   && (existing.OrderType == OrderType.SubscriptionInitial) == req.Subscribe;
         if (!same || existing.PassageId == 0 || string.IsNullOrEmpty(existing.Credential) || existing.ExpireAt <= DateTime.UtcNow)
             throw new PayException(ErrorCodes.OrderExists, "业务订单号已存在（参数不一致或已过期）；每次支付尝试请使用新的 mchOrderNo");
         var passage = await cache.GetPassageAsync(existing.PassageId);
@@ -288,6 +302,7 @@ public sealed class OrderService(
         Amount = o.Amount,
         Provider = o.Provider,
         PayMethod = o.PayMethod,
+        OrderType = (int)o.OrderType,
         PassageId = o.PassageId,
         PassageName = passageName,
         ExpireAt = o.ExpireAt,
@@ -348,7 +363,11 @@ public sealed class OrderService(
                 order.UpstreamTradeNo = tradeNo;
                 order.PaidAt = info.PaidAt ?? now;
                 if (wasClosed) logger.LogWarning("订单 {OrderNo} 在关闭/失败后收到支付成功，已按成功处理", order.OrderNo);
-                return await notify.InsertTaskAsync(conn, tx, order.AppId, order.AppCode, NotifyType.Pay, order.OrderNo, url, NotifyService.BuildPayPayload(order));
+
+                // 订阅首购：以上游为准——只要这笔扣款属于自动续费订阅，就在同一事务内建立（或续上）订阅
+                PaySubscription? sub = null;
+                if (info.Subscription is { } s) sub = await AttachSubscriptionAsync(conn, tx, order, s, now);
+                return await notify.InsertTaskAsync(conn, tx, order.AppId, order.AppCode, NotifyType.Pay, order.OrderNo, url, NotifyService.BuildPayPayload(order, sub));
             });
         }
         catch (MySqlException ex) when (Db.IsDuplicateKey(ex))
@@ -367,6 +386,151 @@ public sealed class OrderService(
         await redis.AddQuotaAsync(order.BindingId, order.Amount, router.BusinessDay);
         await notify.EnqueueAsync(taskId);
         return PaidOutcome.Success;
+    }
+
+    /// <summary>
+    /// 为订阅首购订单建立订阅。若上游订阅标识已存在（例如过期后重新订阅仍沿用同一标识），则把本单挂到原订阅上并顺延周期。
+    /// </summary>
+    private async Task<PaySubscription> AttachSubscriptionAsync(System.Data.IDbConnection conn, System.Data.IDbTransaction tx, PayOrder order, SubscriptionInfo s, DateTime now)
+    {
+        var sub = new PaySubscription
+        {
+            SubNo = orderNo.Next('S'),
+            AppId = order.AppId,
+            AppCode = order.AppCode,
+            ChannelId = order.ChannelId,
+            ChannelCode = order.ChannelCode,
+            PassageId = order.PassageId,
+            Provider = order.Provider,
+            ProductId = order.ProductId,
+            UserId = order.UserId,
+            UpstreamSubId = s.UpstreamSubId,
+            UpstreamToken = s.Token,
+            Status = SubscriptionStatus.Active,
+            AutoRenew = s.AutoRenew,
+            Amount = order.Amount,
+            PeriodStart = s.PeriodStart ?? order.PaidAt ?? now,
+            ExpiresAt = s.ExpiresAt,
+            FirstOrderNo = order.OrderNo,
+            LastOrderNo = order.OrderNo,
+            NotifyUrl = order.NotifyUrl,
+            Attach = order.Attach,
+            NextCheckAt = SubscriptionService.NextCheck(s.ExpiresAt, now),
+            CreatedAt = now,
+            UpdatedAt = now,
+        };
+
+        var existing = await conn.QueryFirstOrDefaultAsync<PaySubscription>(
+            "SELECT * FROM pay_subscription WHERE provider = @Provider AND upstream_sub_id = @UpstreamSubId FOR UPDATE", sub, tx);
+        if (existing is null)
+        {
+            sub.Id = await Db.InsertAsync(conn, tx, sub);
+        }
+        else
+        {
+            await conn.ExecuteAsync(
+                """
+                UPDATE pay_subscription SET status = 1, auto_renew = @AutoRenew, amount = @Amount, period_start = @PeriodStart,
+                  expires_at = COALESCE(@ExpiresAt, expires_at), cancel_at = NULL, renew_count = renew_count + 1, last_order_no = @LastOrderNo,
+                  upstream_token = IF(@UpstreamToken = '', upstream_token, @UpstreamToken), next_check_at = @NextCheckAt, check_count = 0, updated_at = @UpdatedAt
+                WHERE id = @Id
+                """,
+                new { existing.Id, sub.AutoRenew, sub.Amount, sub.PeriodStart, sub.ExpiresAt, sub.LastOrderNo, sub.UpstreamToken, sub.NextCheckAt, sub.UpdatedAt }, tx);
+            existing.Status = SubscriptionStatus.Active;
+            existing.AutoRenew = sub.AutoRenew;
+            existing.ExpiresAt = sub.ExpiresAt ?? existing.ExpiresAt;
+            existing.PeriodStart = sub.PeriodStart;
+            existing.LastOrderNo = order.OrderNo;
+            existing.RenewCount++;
+            sub = existing;
+        }
+
+        order.OrderType = OrderType.SubscriptionInitial;
+        order.SubNo = sub.SubNo;
+        await conn.ExecuteAsync("UPDATE pay_order SET order_type = 1, sub_no = @SubNo WHERE id = @Id", new { sub.SubNo, order.Id }, tx);
+        return sub;
+    }
+
+    /// <summary>
+    /// 记录一次订阅续费：续费单由上游扣款事件生成，生来即为已支付（不经过下单与路由）。
+    /// (provider, upstream_trade_no) 唯一键保证同一笔扣款的重复通知只入账一次；
+    /// 续费单、订阅周期顺延、业务通知任务在同一事务内写入。
+    /// </summary>
+    public async Task<RenewalOutcome> RecordRenewalAsync(PaySubscription sub, RenewalCharge charge, string source)
+    {
+        if (string.IsNullOrWhiteSpace(charge.TradeNo)) return RenewalOutcome.Invalid;
+        if (await db.ScalarAsync<long?>(
+                "SELECT id FROM pay_order WHERE provider = @Provider AND upstream_trade_no = @TradeNo", new { sub.Provider, charge.TradeNo }) is not null)
+            return RenewalOutcome.Duplicate;
+
+        var now = DateTime.UtcNow;
+        var first = await FindAsync(sub.FirstOrderNo);
+        var mchOrderNo = "RENEW-" + charge.TradeNo;
+        var order = new PayOrder
+        {
+            OrderNo = orderNo.Next('P'),
+            AppId = sub.AppId,
+            AppCode = sub.AppCode,
+            MchOrderNo = mchOrderNo.Length > 64 ? mchOrderNo[..64] : mchOrderNo,
+            ChannelId = sub.ChannelId,
+            ChannelCode = sub.ChannelCode,
+            PassageId = sub.PassageId,
+            BindingId = first?.BindingId ?? 0,
+            Provider = sub.Provider,
+            PayMethod = first?.PayMethod ?? "",
+            OrderType = OrderType.SubscriptionRenewal,
+            SubNo = sub.SubNo,
+            Subject = first?.Subject ?? sub.ProductId,
+            Body = "订阅续费",
+            Amount = charge.Amount ?? sub.Amount,
+            Currency = first?.Currency ?? "CNY",
+            Status = OrderStatus.Paid,
+            UpstreamTradeNo = charge.TradeNo,
+            UserId = sub.UserId,
+            BuyerId = charge.BuyerId,
+            ProductId = sub.ProductId,
+            NotifyUrl = sub.NotifyUrl,
+            Attach = sub.Attach,
+            ExpireAt = now,
+            PaidAt = charge.PaidAt ?? now,
+            CreatedAt = now,
+            UpdatedAt = now,
+        };
+        var url = await notify.ResolveUrlAsync(sub.AppId, sub.NotifyUrl);
+
+        long taskId;
+        try
+        {
+            taskId = await db.TransactionAsync(async (conn, tx) =>
+            {
+                order.Id = await Db.InsertAsync(conn, tx, order);
+                var periodStart = charge.PeriodStart ?? order.PaidAt;
+                await conn.ExecuteAsync(
+                    """
+                    UPDATE pay_subscription SET status = 1, auto_renew = 1, cancel_at = NULL, amount = @Amount, period_start = @periodStart,
+                      expires_at = COALESCE(@ExpiresAt, expires_at), renew_count = renew_count + 1, last_order_no = @OrderNo,
+                      upstream_token = IF(@Token = '', upstream_token, @Token), next_check_at = @next, check_count = 0, updated_at = @now
+                    WHERE id = @Id
+                    """,
+                    new { sub.Id, order.Amount, periodStart, charge.ExpiresAt, order.OrderNo, charge.Token, next = SubscriptionService.NextCheck(charge.ExpiresAt ?? sub.ExpiresAt, now), now }, tx);
+                sub.Status = SubscriptionStatus.Active;
+                sub.AutoRenew = true;
+                sub.CancelAt = null;
+                sub.PeriodStart = periodStart;
+                sub.ExpiresAt = charge.ExpiresAt ?? sub.ExpiresAt;
+                sub.RenewCount++;
+                sub.LastOrderNo = order.OrderNo;
+                return await notify.InsertTaskAsync(conn, tx, order.AppId, order.AppCode, NotifyType.Pay, order.OrderNo, url, NotifyService.BuildPayPayload(order, sub));
+            });
+        }
+        catch (MySqlException ex) when (Db.IsDuplicateKey(ex))
+        {
+            return RenewalOutcome.Duplicate;
+        }
+
+        logger.LogInformation("订阅 {SubNo} 续费成功：续费单 {OrderNo}，金额 {Amount} 分，到期 {ExpiresAt:u}，来源 {Source}", sub.SubNo, order.OrderNo, order.Amount, sub.ExpiresAt, source);
+        await notify.EnqueueAsync(taskId);
+        return RenewalOutcome.Renewed;
     }
 
     private static bool SameTrade(PayOrder order, PaidInfo info) =>
@@ -391,6 +555,7 @@ public sealed class OrderService(
                 Config = passage.Config,
                 OrderNo = order.OrderNo,
                 ProductId = order.ProductId,
+                Subscribe = order.OrderType == OrderType.SubscriptionInitial,
                 Receipt = receipt,
             }, ct);
         }
@@ -407,7 +572,7 @@ public sealed class OrderService(
         if (string.IsNullOrEmpty(q.UpstreamTradeNo))
             throw new PayException(ErrorCodes.ReceiptInvalid, "凭证缺少上游交易号");
 
-        var outcome = await HandlePaidAsync(order, new PaidInfo(q.UpstreamTradeNo, q.Amount, q.PaidAt, q.BuyerId), "receipt");
+        var outcome = await HandlePaidAsync(order, new PaidInfo(q.UpstreamTradeNo, q.Amount, q.PaidAt, q.BuyerId, q.Subscription), "receipt");
         return outcome switch
         {
             PaidOutcome.Success or PaidOutcome.AlreadyPaid => (await FindAsync(order.OrderNo))!,

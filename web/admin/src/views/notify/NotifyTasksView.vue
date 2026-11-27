@@ -106,7 +106,7 @@ function httpStatusClass(status: number | null): string {
         <el-form-item label="业务单号">
           <el-input
             v-model="query.bizNo"
-            placeholder="订单号 / 退款单号"
+            placeholder="订单号 / 退款单号 / 订阅号"
             clearable
             style="width: 220px"
             @keyup.enter="search"
@@ -139,7 +139,7 @@ function httpStatusClass(status: number | null): string {
       <div class="toolbar">
         <div class="toolbar__title">
           业务通知任务
-          <span class="toolbar__sub">支付 / 退款结果通知业务服务端的记录；失败会按退避策略自动重试，重试耗尽后需人工重发</span>
+          <span class="toolbar__sub">支付 / 退款 / 订阅状态变更通知业务服务端的记录；失败会按退避策略自动重试，重试耗尽后需人工重发</span>
         </div>
         <div class="toolbar__actions">
           <el-button :icon="Refresh" :loading="loading" @click="load">刷新</el-button>

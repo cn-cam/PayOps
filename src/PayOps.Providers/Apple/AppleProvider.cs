@@ -8,14 +8,16 @@ using PayOps.Providers.Common;
 namespace PayOps.Providers.Apple;
 
 /// <summary>
-/// 苹果应用内购买（StoreKit 2 + App Store Server API + Server Notifications V2）。
+/// 苹果应用内购买（StoreKit 2 + App Store Server API + Server Notifications V2），支持一次性商品与自动续费订阅。
 /// 订单关联：下单返回由订单号可逆编码而成的 appAccountToken（UUID），客户端购买时传入；
-/// 核验与通知中解码即可还原订单号。所有 JWS 均校验 x5c 证书链到 Apple Root CA - G3。
+/// 核验与通知中解码即可还原订单号。订阅以 originalTransactionId 作为订阅标识，每期扣款有独立的 transactionId。
+/// 所有 JWS 均校验 x5c 证书链到 Apple Root CA - G3。苹果没有服务端退订接口，退订只能由用户在系统订阅管理中操作。
 /// </summary>
 public sealed class AppleProvider(IHttpClientFactory httpFactory) : PayProviderBase(httpFactory)
 {
     private const string ProductionHost = "https://api.storekit.itunes.apple.com";
     private const string SandboxHost = "https://api.storekit-sandbox.itunes.apple.com";
+    private const string SubscriptionType = "Auto-Renewable Subscription";
 
     public override ProviderMeta Meta { get; } = new()
     {
@@ -23,7 +25,7 @@ public sealed class AppleProvider(IHttpClientFactory httpFactory) : PayProviderB
         Name = "苹果应用内购买",
         Category = "store",
         Methods = [new("apple_iap", "Apple IAP")],
-        Capabilities = new() { ReceiptVerify = true },
+        Capabilities = new() { ReceiptVerify = true, Subscription = true },
         ConfigFields =
         [
             new() { Key = "bundleId", Label = "Bundle ID", Required = true, Placeholder = "com.example.app" },
@@ -37,7 +39,7 @@ public sealed class AppleProvider(IHttpClientFactory httpFactory) : PayProviderB
                 Help = "正式上线后建议选「仅正式」，避免沙盒凭证在生产发货",
             },
         ],
-        NotifyNote = "请把回调地址配置到 App Store Connect「App 信息 → App Store 服务器通知」（选择 Version 2）。客户端购买时须把下单返回的 appAccountToken 传入 purchase(options:)。",
+        NotifyNote = "请把回调地址配置到 App Store Connect「App 信息 → App Store 服务器通知」（选择 Version 2）。客户端购买时须把下单返回的 appAccountToken 传入 purchase(options:)。订阅的续订、退订、到期全部由服务器通知驱动。",
     };
 
     protected override string? ValidateKeys(PassageConfig config)
@@ -57,6 +59,7 @@ public sealed class AppleProvider(IHttpClientFactory httpFactory) : PayProviderB
             {
                 ["orderNo"] = ctx.OrderNo, ["productId"] = ctx.ProductId,
                 ["appAccountToken"] = AppleToken.Encode(ctx.OrderNo),
+                ["subscription"] = ctx.Subscribe,
             },
         });
     }
@@ -70,9 +73,52 @@ public sealed class AppleProvider(IHttpClientFactory httpFactory) : PayProviderB
             throw BadRequest("缺少有效的 transactionId（或 signedTransaction）");
 
         // 一律回源 App Store Server API，不直接信任客户端上传的 JWS
-        var signed = await GetTransactionAsync(ctx.Config, transactionId, ct);
-        return ToQueryResult(ctx.Config, AppleJws.VerifyAndDecode(signed));
+        var body = await GetAsync(ctx.Config, $"/inApps/v1/transactions/{transactionId}", ct);
+        return ToQueryResult(ctx.Config, AppleJws.VerifyAndDecode(body.Str("signedTransactionInfo")));
     }
+
+    /// <summary>查询订阅现状（Get All Subscription Statuses）。status：1 生效 2 过期 3 扣款重试 4 宽限期 5 撤销。</summary>
+    public override async Task<SubscriptionState> QuerySubscriptionAsync(SubscriptionContext ctx, CancellationToken ct)
+    {
+        if (!ctx.UpstreamSubId.All(char.IsAsciiLetterOrDigit)) throw BadRequest("订阅标识无效");
+        var body = await GetAsync(ctx.Config, $"/inApps/v1/subscriptions/{ctx.UpstreamSubId}", ct);
+        if (!body.TryGetProperty("data", out var groups) || groups.ValueKind != JsonValueKind.Array)
+            return new SubscriptionState { Known = false, Message = "App Store 未返回订阅数据" };
+
+        foreach (var group in groups.EnumerateArray())
+        {
+            if (!group.TryGetProperty("lastTransactions", out var list) || list.ValueKind != JsonValueKind.Array) continue;
+            foreach (var item in list.EnumerateArray())
+            {
+                if (item.Str("originalTransactionId") != ctx.UpstreamSubId) continue;
+                var status = item.Long("status") ?? 0;
+                var tx = AppleJws.VerifyAndDecode(item.Str("signedTransactionInfo"));
+                var autoRenew = false;
+                if (item.Str("signedRenewalInfo") is { Length: > 0 } renewal)
+                    autoRenew = AppleJws.VerifyAndDecode(renewal).Long("autoRenewStatus") == 1;
+                return new SubscriptionState
+                {
+                    Known = true,
+                    // 宽限期内仍应提供服务；扣款重试期（3）按未生效处理，扣款恢复后会经 DID_RENEW 重新激活
+                    Active = status is 1 or 4,
+                    Revoked = status == 5,
+                    AutoRenew = autoRenew,
+                    PeriodStart = Ms(tx, "purchaseDate"),
+                    ExpiresAt = Ms(tx, "expiresDate"),
+                    LatestTradeNo = tx.Str("transactionId") is { Length: > 0 } id ? id : null,
+                    LatestAmount = Price(tx),
+                    LatestPaidAt = Ms(tx, "purchaseDate"),
+                    Message = $"status={status}",
+                };
+            }
+        }
+        return new SubscriptionState { Known = false, Message = "App Store 返回的数据中没有该订阅" };
+    }
+
+    public override Task CancelSubscriptionAsync(SubscriptionContext ctx, CancellationToken ct) =>
+        throw new ProviderException("NOT_SUPPORTED",
+            "苹果不提供服务端退订接口：请在 App 内调用 AppStore.showManageSubscriptions，或引导用户到「设置 → Apple 账户 → 订阅」退订；退订结果会经服务器通知自动同步",
+            requestFault: true);
 
     public override Task<NotifyParseResult> ParseNotifyAsync(NotifyContext ctx, CancellationToken ct)
     {
@@ -90,7 +136,8 @@ public sealed class AppleProvider(IHttpClientFactory httpFactory) : PayProviderB
         }
 
         var type = payload.Str("notificationType");
-        if (type is not ("ONE_TIME_CHARGE" or "REFUND"))
+        var subtype = payload.Str("subtype");
+        if (type is not ("ONE_TIME_CHARGE" or "REFUND" or "SUBSCRIBED" or "DID_RENEW" or "DID_CHANGE_RENEWAL_STATUS" or "EXPIRED" or "GRACE_PERIOD_EXPIRED" or "REVOKE"))
             return Task.FromResult(NotifyParseResult.Ignore($"忽略通知类型 {type}"));
         var data = payload.Obj("data");
         if (data is null) return Task.FromResult(NotifyParseResult.Ignore("缺少 data"));
@@ -109,30 +156,72 @@ public sealed class AppleProvider(IHttpClientFactory httpFactory) : PayProviderB
             return Task.FromResult(NotifyParseResult.Fail(ex.Message));
         }
 
-        if (type == "REFUND")
+        var result = new NotifyParseResult { Verified = true };
+        var isSubscription = q.Subscription is not null;
+        switch (type)
         {
-            // 未携带 appAccountToken 时 OrderNo 为空，由服务层按上游交易号反查订单
-            return Task.FromResult(NotifyParseResult.Of(new NotifyEvent
-            {
-                Type = NotifyEventType.Refund,
-                OrderNo = q.BoundOrderNo ?? "",
-                UpstreamTradeNo = q.UpstreamTradeNo,
-                UpstreamRefundNo = "APPLE-" + q.UpstreamTradeNo,
-                Message = "App Store 侧退款",
-            }));
-        }
+            case "ONE_TIME_CHARGE":
+                if (string.IsNullOrEmpty(q.BoundOrderNo))
+                    return Task.FromResult(NotifyParseResult.Ignore("交易未携带 appAccountToken，等待客户端提交凭证核验"));
+                result.Events.Add(new NotifyEvent
+                {
+                    Type = NotifyEventType.Paid, OrderNo = q.BoundOrderNo, UpstreamTradeNo = q.UpstreamTradeNo,
+                    PaidAt = q.PaidAt, ProductId = q.ProductId,
+                });
+                break;
 
-        if (string.IsNullOrEmpty(q.BoundOrderNo))
-            return Task.FromResult(NotifyParseResult.Ignore("交易未携带 appAccountToken，等待客户端提交凭证核验"));
-        return Task.FromResult(NotifyParseResult.Of(new NotifyEvent
-        {
-            Type = NotifyEventType.Paid,
-            OrderNo = q.BoundOrderNo,
-            UpstreamTradeNo = q.UpstreamTradeNo,
-            PaidAt = q.PaidAt,
-            ProductId = q.ProductId,
-        }));
+            case "SUBSCRIBED" or "DID_RENEW" when isSubscription:
+                // 首购与续订统一上报为"一次成功扣款"，由服务层按订阅是否已存在区分
+                result.Events.Add(SubscriptionEvent(SubscriptionEventKind.Charged, q));
+                break;
+
+            case "DID_CHANGE_RENEWAL_STATUS" when isSubscription:
+                if (subtype is not ("AUTO_RENEW_DISABLED" or "AUTO_RENEW_ENABLED"))
+                    return Task.FromResult(NotifyParseResult.Ignore($"忽略续订状态子类型 {subtype}"));
+                result.Events.Add(SubscriptionEvent(
+                    subtype == "AUTO_RENEW_DISABLED" ? SubscriptionEventKind.AutoRenewOff : SubscriptionEventKind.AutoRenewOn, q));
+                break;
+
+            case "EXPIRED" or "GRACE_PERIOD_EXPIRED" when isSubscription:
+                result.Events.Add(SubscriptionEvent(SubscriptionEventKind.Expired, q));
+                break;
+
+            case "REVOKE" when isSubscription:
+                result.Events.Add(SubscriptionEvent(SubscriptionEventKind.Revoked, q));
+                break;
+
+            case "REFUND":
+                // 订阅的每期扣款对应不同订单（首购单 / 续费单），因此退款一律按上游交易号反查订单；
+                // 一次性商品优先用 appAccountToken 还原的订单号
+                result.Events.Add(new NotifyEvent
+                {
+                    Type = NotifyEventType.Refund,
+                    OrderNo = isSubscription ? "" : q.BoundOrderNo ?? "",
+                    UpstreamTradeNo = q.UpstreamTradeNo,
+                    UpstreamRefundNo = "APPLE-" + q.UpstreamTradeNo,
+                    Message = "App Store 侧退款",
+                });
+                // 退的是仍在有效期内的那一期：订阅随之撤销
+                if (isSubscription && q.Subscription!.ExpiresAt > DateTime.UtcNow)
+                    result.Events.Add(SubscriptionEvent(SubscriptionEventKind.Revoked, q));
+                break;
+
+            default:
+                return Task.FromResult(NotifyParseResult.Ignore($"通知 {type} 与交易类型不匹配，已忽略"));
+        }
+        return Task.FromResult(result);
     }
+
+    private static NotifyEvent SubscriptionEvent(SubscriptionEventKind kind, QueryResult q) => new()
+    {
+        Type = NotifyEventType.Subscription,
+        SubKind = kind,
+        OrderNo = q.BoundOrderNo is { } bound && !bound.StartsWith("apple-token:", StringComparison.Ordinal) ? bound : "",
+        UpstreamTradeNo = q.UpstreamTradeNo,
+        PaidAt = q.PaidAt,
+        ProductId = q.ProductId,
+        Subscription = q.Subscription,
+    };
 
     public override NotifyReply BuildReply(NotifyOutcome outcome, string message) =>
         outcome == NotifyOutcome.Success ? NotifyReply.Text("") : NotifyReply.Text(message, 500);
@@ -145,6 +234,11 @@ public sealed class AppleProvider(IHttpClientFactory httpFactory) : PayProviderB
             _ => true,
         };
 
+    private static DateTime? Ms(JsonElement tx, string name) => tx.Long(name) is { } t and > 0 ? TimeUtil.FromUnixMs(t) : null;
+
+    /// <summary>人民币价格（分）：price 为千分位单位，仅用于记录，不参与校验。</summary>
+    private static long? Price(JsonElement tx) => tx.Str("currency") == "CNY" && tx.Long("price") is { } p ? p / 10 : null;
+
     private static QueryResult ToQueryResult(PassageConfig cfg, JsonElement tx)
     {
         if (tx.Str("bundleId") != cfg.Require("bundleId"))
@@ -154,20 +248,32 @@ public sealed class AppleProvider(IHttpClientFactory httpFactory) : PayProviderB
 
         var revoked = tx.Long("revocationDate") is > 0;
         var token = tx.Str("appAccountToken");
+        var originalId = tx.Str("originalTransactionId");
         return new QueryResult
         {
             State = revoked ? UpstreamState.Refunded : UpstreamState.Paid,
             UpstreamTradeNo = tx.Str("transactionId") is { Length: > 0 } id ? id : null,
             // 苹果价格由商品档位决定且随店面币种变化，不参与金额校验
             Amount = null,
-            PaidAt = tx.Long("purchaseDate") is { } t and > 0 ? TimeUtil.FromUnixMs(t) : null,
+            PaidAt = Ms(tx, "purchaseDate"),
             BoundOrderNo = token.Length > 0 ? AppleToken.Decode(token) ?? "apple-token:" + token : null,
             ProductId = tx.Str("productId"),
             Message = revoked ? "已撤销/退款" : "已购买",
+            Subscription = tx.Str("type") == SubscriptionType && originalId.Length > 0
+                ? new SubscriptionInfo
+                {
+                    UpstreamSubId = originalId,
+                    PeriodStart = Ms(tx, "purchaseDate"),
+                    ExpiresAt = Ms(tx, "expiresDate"),
+                    AutoRenew = true,
+                    Amount = Price(tx),
+                }
+                : null,
         };
     }
 
-    private async Task<string> GetTransactionAsync(PassageConfig cfg, string transactionId, CancellationToken ct)
+    /// <summary>调用 App Store Server API：按环境配置依次尝试正式与沙盒。</summary>
+    private async Task<JsonElement> GetAsync(PassageConfig cfg, string path, CancellationToken ct)
     {
         var hosts = cfg.Get("environment", "Auto") switch
         {
@@ -179,15 +285,15 @@ public sealed class AppleProvider(IHttpClientFactory httpFactory) : PayProviderB
         var lastError = "";
         foreach (var host in hosts)
         {
-            using var req = new HttpRequestMessage(HttpMethod.Get, $"{host}/inApps/v1/transactions/{transactionId}");
+            using var req = new HttpRequestMessage(HttpMethod.Get, host + path);
             req.Headers.TryAddWithoutValidation("Authorization", "Bearer " + jwt);
             var (status, text) = await SendAsync(req, ct);
-            if (status == 200) return ParseJson(text, Meta.Name).Str("signedTransactionInfo");
+            if (status == 200) return ParseJson(text, Meta.Name);
             lastError = $"HTTP {status} {Truncate(text, 200)}";
             // 404（交易不在该环境）或 401（应用尚未在正式环境发布）时尝试下一个环境
             if (status is not (404 or 401)) break;
         }
-        throw new ProviderException("APPLE_TRANSACTION", $"查询 App Store 交易失败：{lastError}", requestFault: true);
+        throw new ProviderException("APPLE_API", $"请求 App Store Server API 失败：{lastError}", requestFault: true);
     }
 
     public static string BuildApiToken(PassageConfig cfg)

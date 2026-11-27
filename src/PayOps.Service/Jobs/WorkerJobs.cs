@@ -20,7 +20,10 @@ public sealed class DispatchJob(IServiceProvider services, ILogger<DispatchJob> 
     protected override Task ExecuteAsync(CancellationToken stoppingToken) => Task.WhenAll(
         LoopAsync("notify-dispatch", TimeSpan.FromSeconds(2), DispatchNotifyAsync, stoppingToken),
         LoopAsync("order-check-dispatch", TimeSpan.FromSeconds(5), DispatchOrderChecksAsync, stoppingToken),
-        LoopAsync("refund-check-dispatch", TimeSpan.FromSeconds(10), DispatchRefundChecksAsync, stoppingToken));
+        LoopAsync("refund-check-dispatch", TimeSpan.FromSeconds(10), DispatchRefundChecksAsync, stoppingToken),
+        LoopAsync("subscription-check-dispatch", TimeSpan.FromSeconds(30), DispatchSubscriptionChecksAsync, stoppingToken),
+        LoopAsync("recon-dispatch", TimeSpan.FromSeconds(30), DispatchReconAsync, stoppingToken),
+        LoopAsync("recon-schedule", TimeSpan.FromMinutes(5), ScheduleReconAsync, stoppingToken));
 
     private async Task LoopAsync(string name, TimeSpan interval, Func<CancellationToken, Task<int>> work, CancellationToken ct)
     {
@@ -68,6 +71,31 @@ public sealed class DispatchJob(IServiceProvider services, ILogger<DispatchJob> 
         var due = await services.GetRequiredService<OrderService>().ClaimDueChecksAsync(BatchSize);
         foreach (var orderNo in due) await mq.PublishAsync(MqBus.CheckQueue, "order:" + orderNo, ct);
         return due.Count;
+    }
+
+    private async Task<int> DispatchSubscriptionChecksAsync(CancellationToken ct)
+    {
+        var mq = services.GetRequiredService<MqBus>();
+        await mq.EnsureConnectedAsync(ct);
+        var due = await services.GetRequiredService<SubscriptionService>().ClaimDueChecksAsync(BatchSize);
+        foreach (var subNo in due) await mq.PublishAsync(MqBus.CheckQueue, "sub:" + subNo, ct);
+        return due.Count;
+    }
+
+    private async Task<int> DispatchReconAsync(CancellationToken ct)
+    {
+        var mq = services.GetRequiredService<MqBus>();
+        await mq.EnsureConnectedAsync(ct);
+        var due = await services.GetRequiredService<ReconService>().ClaimDueAsync(20);
+        foreach (var id in due) await mq.PublishAsync(MqBus.CheckQueue, "recon:" + id, ct);
+        return due.Count;
+    }
+
+    /// <summary>生成昨日对账批次。各副本都会执行，靠唯一键去重，无需选主。</summary>
+    private async Task<int> ScheduleReconAsync(CancellationToken ct)
+    {
+        await services.GetRequiredService<ReconService>().ScheduleAsync();
+        return 0;
     }
 
     private async Task<int> DispatchRefundChecksAsync(CancellationToken ct)
@@ -140,6 +168,10 @@ public sealed class ConsumerJob(IServiceProvider services, IOptions<PayOpsOption
             return services.GetRequiredService<OrderService>().CheckAsync(body[6..], ct);
         if (body.StartsWith("refund:", StringComparison.Ordinal))
             return services.GetRequiredService<RefundService>().CheckAsync(body[7..], ct);
+        if (body.StartsWith("sub:", StringComparison.Ordinal))
+            return services.GetRequiredService<SubscriptionService>().CheckAsync(body[4..], ct);
+        if (body.StartsWith("recon:", StringComparison.Ordinal) && long.TryParse(body[6..], out var batchId))
+            return services.GetRequiredService<ReconService>().RunAsync(batchId, ct);
         return Task.CompletedTask;
     }
 

@@ -318,7 +318,7 @@ function go(path: string, query: Record<string, string>) {
         <div class="todo-card__dot todo-card__dot--warning" />
         <div class="todo-card__body">
           <div class="todo-card__label">待通知业务方</div>
-          <div class="todo-card__hint">等待发送或重试中的业务通知</div>
+          <div class="todo-card__hint" title="等待发送或重试中的业务通知">等待发送或重试中的业务通知</div>
         </div>
         <div class="todo-card__num">{{ formatCount(summary?.pendingNotify ?? 0) }}</div>
       </div>
@@ -326,7 +326,7 @@ function go(path: string, query: Record<string, string>) {
         <div class="todo-card__dot todo-card__dot--danger" />
         <div class="todo-card__body">
           <div class="todo-card__label">通知失败</div>
-          <div class="todo-card__hint">重试耗尽，需要人工重发</div>
+          <div class="todo-card__hint" title="重试耗尽，需要人工重发">重试耗尽，需要人工重发</div>
         </div>
         <div class="todo-card__num" :class="{ 'text-danger': (summary?.failedNotify ?? 0) > 0 }">
           {{ formatCount(summary?.failedNotify ?? 0) }}
@@ -336,9 +336,36 @@ function go(path: string, query: Record<string, string>) {
         <div class="todo-card__dot todo-card__dot--primary" />
         <div class="todo-card__body">
           <div class="todo-card__label">处理中退款</div>
-          <div class="todo-card__hint">已提交上游、尚未返回结果的退款</div>
+          <div class="todo-card__hint" title="已提交上游、尚未返回结果的退款">已提交上游、尚未返回结果的退款</div>
         </div>
         <div class="todo-card__num">{{ formatCount(summary?.processingRefund ?? 0) }}</div>
+      </div>
+      <div class="todo-card" @click="go('/subscriptions', { status: '1' })">
+        <div class="todo-card__dot todo-card__dot--success" />
+        <div class="todo-card__body">
+          <div class="todo-card__label">生效中订阅</div>
+          <div class="todo-card__hint" title="当前处于生效状态的自动续费订阅">当前生效的自动续费订阅</div>
+        </div>
+        <div class="todo-card__num">{{ formatCount(summary?.activeSubscriptions ?? 0) }}</div>
+      </div>
+      <div
+        class="todo-card"
+        :class="{ 'todo-card--warn': (summary?.openReconDiffs ?? 0) > 0 }"
+        @click="go('/recon', { tab: 'diffs', status: '0' })"
+      >
+        <div
+          class="todo-card__dot"
+          :class="(summary?.openReconDiffs ?? 0) > 0 ? 'todo-card__dot--danger' : 'todo-card__dot--success'"
+        />
+        <div class="todo-card__body">
+          <div class="todo-card__label">待处理对账差异</div>
+          <div class="todo-card__hint" title="上游账单与本地记录不一致、尚未处理的交易">
+            {{ (summary?.openReconDiffs ?? 0) > 0 ? '账单与本地不一致，需要核实' : '上游账单与本地记录一致' }}
+          </div>
+        </div>
+        <div class="todo-card__num" :class="{ 'text-danger': (summary?.openReconDiffs ?? 0) > 0 }">
+          {{ formatCount(summary?.openReconDiffs ?? 0) }}
+        </div>
       </div>
     </div>
 
@@ -567,14 +594,16 @@ function go(path: string, query: Record<string, string>) {
 }
 .todo-grid {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(5, minmax(0, 1fr));
   gap: 16px;
 }
 .todo-card {
   display: flex;
   align-items: center;
-  gap: 14px;
-  padding: 14px 20px;
+  gap: 12px;
+  min-width: 0;
+  padding: 14px 16px;
+  border: 1px solid transparent;
   border-radius: 8px;
   background: #fff;
   cursor: pointer;
@@ -598,17 +627,30 @@ function go(path: string, query: Record<string, string>) {
 .todo-card__dot--primary {
   background: var(--el-color-primary);
 }
+.todo-card__dot--success {
+  background: var(--el-color-success);
+}
+.todo-card--warn {
+  border-color: #fecaca;
+  background: #fef2f2;
+}
 .todo-card__body {
   flex: 1;
   min-width: 0;
 }
 .todo-card__label {
   font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .todo-card__hint {
   margin-top: 2px;
   color: var(--el-text-color-secondary);
   font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .todo-card__num {
   font-size: 24px;

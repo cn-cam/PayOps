@@ -4,8 +4,10 @@ import { useRoute, useRouter } from 'vue-router'
 import {
   ArrowDown,
   Bell,
+  Calendar,
   Connection,
   DataLine,
+  DocumentChecked,
   Expand,
   Fold,
   Grid,
@@ -51,7 +53,9 @@ const menuGroups: MenuGroup[] = [
     items: [
       { path: '/orders', icon: Tickets },
       { path: '/orders/test', icon: Promotion },
+      { path: '/subscriptions', icon: Calendar },
       { path: '/refunds', icon: RefreshLeft },
+      { path: '/recon', icon: DocumentChecked },
     ],
   },
   {
